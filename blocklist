@@ -1,0 +1,18 @@
+# Sentinel DNS Blocklist
+# One domain per line. Lines starting with # are ignored.
+# Prefix with *. for wildcard subdomain blocking.
+
+# Malware / C2
+malware-c2.ru
+*.evil-tracker.cn
+phishing-login.tk
+*.malware-domain.net
+
+# Trackers
+doubleclick.net
+*.doubleclick.net
+ads.google.com
+*.ads.google.com
+tracking.example.com
+
+# Add your own below:

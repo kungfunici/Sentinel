@@ -1,0 +1,27 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "sentinel"
+version = "0.1.0"
+description = "Local network security monitoring suite"
+requires-python = ">=3.11"
+dependencies = [
+    "scapy>=2.5",
+    "aiosqlite>=0.19",
+    "rich>=13",
+]
+
+[project.optional-dependencies]
+dev = ["pytest", "pytest-asyncio", "black", "ruff"]
+
+[project.scripts]
+sentinel = "sentinel.main:main"
+sentinel-query = "sentinel.cli.query:main"
+
+[tool.ruff]
+line-length = 100
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
