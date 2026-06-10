@@ -5,12 +5,9 @@ Entry point. Wires up:
     EventBus → DB writer
     PacketSniffer → EventBus
     DnsMonitor → EventBus
+    ArpWatcher → EventBus
     Enricher → auto-enriches NEW_DEVICE events in background
     CLI display loop
-
-Run as Admin (required for raw packet capture):
-    .venv\Scripts\python.exe -m sentinel.main         (Windows, Admin PowerShell)
-    sudo python -m sentinel.main                      (Linux)
 """
 
 import asyncio
@@ -33,6 +30,7 @@ from sentinel.core.database import Database
 from sentinel.core.enrichment import Enricher
 from sentinel.collectors.sniffer import PacketSniffer
 from sentinel.collectors.dns_monitor import DnsMonitor
+from sentinel.collectors.arp_watcher import ArpWatcher
 
 console = Console()
 
@@ -70,15 +68,9 @@ async def db_writer(bus: EventBus, db: Database) -> None:
 # ------------------------------------------------------------------ #
 
 async def enrichment_loop(bus: EventBus, db: Database, enricher: Enricher) -> None:
-    """
-    Listens for NEW_DEVICE events and enriches them in the background.
-    Also runs a full enrichment pass on startup for existing devices.
-    """
-    # Enrich existing devices on startup
-    await asyncio.sleep(3)   # let DB writer settle first
+    await asyncio.sleep(3)
     await enricher.enrich_all_devices(db)
 
-    # Then enrich new devices as they appear
     async with bus.subscribe(min_severity="info") as sub:
         async for event in sub:
             if event.type != EventType.NEW_DEVICE:
@@ -139,7 +131,7 @@ class LiveDisplay:
         table.add_column("Time",   style="dim", width=10, no_wrap=True)
         table.add_column("Sev",    width=8,  no_wrap=True)
         table.add_column("Type",   width=6,  no_wrap=True)
-        table.add_column("Source", width=10, no_wrap=True)
+        table.add_column("Source", width=12, no_wrap=True)
         table.add_column("Detail", ratio=1)
 
         for ev in reversed(self._events):
@@ -163,6 +155,8 @@ def _format_detail(ev: Event) -> str:
     if ev.type == EventType.NEW_DEVICE:
         mac = f" mac={d['mac']}" if d.get("mac") else ""
         return f"New host: {d.get('ip','?')}{mac}"
+    if ev.type == EventType.ARP_ANOMALY:
+        return d.get("description", str(d)[:120])
     return str(d)[:120]
 
 
@@ -197,7 +191,6 @@ async def run(args: argparse.Namespace, stop_event: asyncio.Event) -> None:
             severity="info", source="main",
         ))
 
-        # Setup enricher (load/download OUI db)
         console.print("[dim]Loading OUI database...[/]")
         await enricher.setup()
 
@@ -206,15 +199,17 @@ async def run(args: argparse.Namespace, stop_event: asyncio.Event) -> None:
             bus, iface=args.iface, mode="active",
             blocklist_path=Path(args.blocklist) if args.blocklist else None,
         )
+        arp     = ArpWatcher(bus, iface=args.iface, gateway_ip=args.gateway)
 
         tasks = [
-            asyncio.create_task(db_writer(bus, db),                          name="db-writer"),
-            asyncio.create_task(display_loop(bus, display),                   name="cli-display"),
-            asyncio.create_task(enrichment_loop(bus, db, enricher),           name="enricher"),
+            asyncio.create_task(db_writer(bus, db),               name="db-writer"),
+            asyncio.create_task(display_loop(bus, display),        name="cli-display"),
+            asyncio.create_task(enrichment_loop(bus, db, enricher), name="enricher"),
         ]
 
         await sniffer.start()
         await dns.start()
+        await arp.start()
 
         if sys.platform != "win32":
             loop = asyncio.get_running_loop()
@@ -231,6 +226,7 @@ async def run(args: argparse.Namespace, stop_event: asyncio.Event) -> None:
 
         await sniffer.stop()
         await dns.stop()
+        await arp.stop()
 
         for t in tasks:
             t.cancel()
@@ -239,6 +235,7 @@ async def run(args: argparse.Namespace, stop_event: asyncio.Event) -> None:
         stats = await db.stats()
         console.print("\n[bold]Session stats:[/]", stats)
         console.print("[bold]Bus stats:[/]", bus.stats)
+        console.print("[bold]ARP stats:[/]", arp.stats)
 
 
 def main() -> None:
@@ -246,6 +243,7 @@ def main() -> None:
     parser.add_argument("--iface",     default=None,          help="Network interface (default: auto)")
     parser.add_argument("--db",        default="sentinel.db", help="SQLite database path")
     parser.add_argument("--blocklist", default=None,          help="Path to DNS blocklist file")
+    parser.add_argument("--gateway",   default=None,          help="Gateway IP for spoofing detection (default: auto)")
     parser.add_argument("--verbose",   action="store_true",   help="Debug logging")
     args = parser.parse_args()
 
