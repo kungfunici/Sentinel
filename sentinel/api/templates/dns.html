@@ -1,0 +1,43 @@
+{% extends "base.html" %}
+{% block content %}
+<div class="flex items-center justify-between mb-6">
+    <h1 class="text-lg font-semibold">DNS Queries <span class="text-gray-500 text-sm font-normal">({{ queries|length }})</span></h1>
+    <div class="flex gap-2 text-xs">
+        <a href="/dns" class="px-3 py-1.5 rounded border border-border hover:bg-white/5 {% if not blocked %}bg-white/10{% endif %}">All</a>
+        <a href="/dns?blocked=true" class="px-3 py-1.5 rounded border border-border hover:bg-white/5 {% if blocked %}bg-red-900/30 border-red-700{% endif %} text-red-400">Blocked only</a>
+    </div>
+</div>
+
+<div class="bg-panel border border-border rounded-xl overflow-hidden">
+    <table class="w-full text-sm">
+        <thead class="border-b border-border text-xs text-gray-500 uppercase tracking-wider">
+            <tr>
+                <th class="px-4 py-3 text-left">Time</th>
+                <th class="px-4 py-3 text-left">Src IP</th>
+                <th class="px-4 py-3 text-left">Query</th>
+                <th class="px-4 py-3 text-left">Type</th>
+                <th class="px-4 py-3 text-left">Status</th>
+            </tr>
+        </thead>
+        <tbody class="divide-y divide-border font-mono text-xs">
+        {% for q in queries %}
+            <tr class="hover:bg-white/5 transition-colors {% if q.blocked %}bg-red-900/10{% endif %}">
+                <td class="px-4 py-2.5 text-gray-500">{{ q.timestamp | int }}</td>
+                <td class="px-4 py-2.5 text-gray-300">{{ q.src_ip }}</td>
+                <td class="px-4 py-2.5 text-gray-200">{{ q.query_name }}</td>
+                <td class="px-4 py-2.5 text-gray-500">{{ q.query_type }}</td>
+                <td class="px-4 py-2.5">
+                    {% if q.blocked %}
+                        <span class="px-2 py-0.5 rounded badge-critical">BLOCKED</span>
+                    {% else %}
+                        <span class="px-2 py-0.5 rounded badge-ok">ok</span>
+                    {% endif %}
+                </td>
+            </tr>
+        {% else %}
+            <tr><td colspan="5" class="px-4 py-8 text-center text-gray-600">No DNS queries found</td></tr>
+        {% endfor %}
+        </tbody>
+    </table>
+</div>
+{% endblock %}

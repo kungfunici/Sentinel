@@ -112,7 +112,6 @@ class PortScanner:
         )
 
     async def stop(self) -> None:
-        self.own_ip   = own_ip
         self._running = False
         if self._task:
             self._task.cancel()

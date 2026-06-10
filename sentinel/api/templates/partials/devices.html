@@ -1,0 +1,14 @@
+<div class="space-y-2">
+{% for d in devices %}
+<div class="flex items-center gap-3 py-2 border-b border-border/50 last:border-0">
+    <span class="w-2 h-2 rounded-full shrink-0 {% if d.flagged %}bg-red-400{% else %}bg-green-400{% endif %}"></span>
+    <div class="flex-1 min-w-0">
+        <div class="text-sm font-mono truncate">{{ d.ip }}</div>
+        <div class="text-xs text-gray-500 truncate">{{ d.hostname or d.vendor or 'Unknown' }}</div>
+    </div>
+    {% if d.flagged %}<span class="text-xs px-2 py-0.5 rounded badge-critical">flagged</span>{% endif %}
+</div>
+{% else %}
+<div class="text-sm text-gray-600 py-4 text-center">No devices yet</div>
+{% endfor %}
+</div>

@@ -13,6 +13,7 @@ Entry point. Wires up:
 import asyncio
 import argparse
 import logging
+import uvicorn
 import signal
 import socket
 import sys
@@ -33,6 +34,7 @@ from sentinel.collectors.sniffer import PacketSniffer
 from sentinel.collectors.dns_monitor import DnsMonitor
 from sentinel.collectors.arp_watcher import ArpWatcher
 from sentinel.collectors.port_scanner import PortScanner
+from sentinel.api.app import app as fastapi_app, init as api_init, event_broadcaster
 
 console = Console()
 
@@ -179,6 +181,16 @@ async def display_loop(bus: EventBus, display: LiveDisplay) -> None:
 #  Main                                                                #
 # ------------------------------------------------------------------ #
 
+async def _run_uvicorn(host: str, port: int) -> None:
+    """Run uvicorn in a way that shuts down cleanly with asyncio cancellation."""
+    config = uvicorn.Config(fastapi_app, host=host, port=port, log_level="warning")
+    server = uvicorn.Server(config)
+    try:
+        await server.serve()
+    except asyncio.CancelledError:
+        server.should_exit = True
+
+
 async def _target_feeder(bus: EventBus, scanner: PortScanner) -> None:
     """Feeds NEW_DEVICE events into the port scanner as targets."""
     async with bus.subscribe(min_severity="info") as sub:
@@ -234,6 +246,9 @@ async def run(args: argparse.Namespace, stop_event: asyncio.Event) -> None:
             severity="info", source="main",
         ))
 
+        # Init API with shared db + bus
+        api_init(db, bus)
+
         console.print("[dim]Loading OUI database...[/]")
         await enricher.setup()
 
@@ -250,6 +265,11 @@ async def run(args: argparse.Namespace, stop_event: asyncio.Event) -> None:
             asyncio.create_task(display_loop(bus, display),        name="cli-display"),
             asyncio.create_task(enrichment_loop(bus, db, enricher), name="enricher"),
             asyncio.create_task(_target_feeder(bus, scanner),           name="target-feeder"),
+            asyncio.create_task(event_broadcaster(),                       name="ws-broadcaster"),
+            asyncio.create_task(
+                _run_uvicorn(args.host, args.port),
+                name="api-server",
+            ),
         ]
 
         await sniffer.start()
@@ -291,12 +311,15 @@ def main() -> None:
     parser.add_argument("--db",        default="sentinel.db", help="SQLite database path")
     parser.add_argument("--blocklist", default=None,          help="Path to DNS blocklist file")
     parser.add_argument("--gateway",   default=None,          help="Gateway IP for spoofing detection (default: auto)")
+    parser.add_argument("--host", default="0.0.0.0", help="API host (default: 0.0.0.0)")
+    parser.add_argument("--port", type=int, default=8888, help="API port (default: 8888)")
     parser.add_argument("--scan-interval", type=int, default=60, help="Port scan interval in seconds (default: 60)")
     parser.add_argument("--verbose",   action="store_true",   help="Debug logging")
     args = parser.parse_args()
 
     setup_logging(args.verbose)
     console.print("[bold green]Sentinel starting...[/] (Ctrl+C to stop)")
+    console.print(f"[dim]Dashboard: http://localhost:{args.port}[/]")
 
     stop_event = asyncio.Event()
 

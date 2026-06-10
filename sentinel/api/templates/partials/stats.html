@@ -1,0 +1,22 @@
+<div class="grid grid-cols-2 sm:grid-cols-4 gap-4">
+    <div class="bg-white/5 border border-border rounded-xl p-4">
+        <div class="text-xl mb-1">🖥</div>
+        <div class="text-2xl font-semibold">{{ stats.devices or 0 }}</div>
+        <div class="text-xs text-gray-500 mt-0.5">Devices</div>
+    </div>
+    <div class="bg-white/5 border border-border rounded-xl p-4">
+        <div class="text-xl mb-1">📦</div>
+        <div class="text-2xl font-semibold">{{ stats.events or 0 }}</div>
+        <div class="text-xs text-gray-500 mt-0.5">Events</div>
+    </div>
+    <div class="bg-white/5 border border-border rounded-xl p-4">
+        <div class="text-xl mb-1">🚫</div>
+        <div class="text-2xl font-semibold {% if stats.dns_blocked %}text-red-400{% endif %}">{{ stats.dns_blocked or 0 }}</div>
+        <div class="text-xs text-gray-500 mt-0.5">DNS Blocked</div>
+    </div>
+    <div class="bg-white/5 border border-border rounded-xl p-4">
+        <div class="text-xl mb-1">🔍</div>
+        <div class="text-2xl font-semibold">{{ stats.dns_queries or 0 }}</div>
+        <div class="text-xs text-gray-500 mt-0.5">DNS Queries</div>
+    </div>
+</div>
