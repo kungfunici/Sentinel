@@ -20,7 +20,6 @@ from typing import Optional
 
 from scapy.layers.inet import IP, TCP, UDP, ICMP
 from scapy.layers.l2 import ARP, Ether
-from scapy.layers.inet6 import IPv6
 from scapy.sendrecv import AsyncSniffer
 
 from sentinel.core.event_bus import Event, EventBus, EventType
@@ -46,8 +45,9 @@ class PacketSniffer:
         self,
         bus: EventBus,
         iface: Optional[str] = None,
-        bpf_filter: str = "ip or ip6 or arp",
+        bpf_filter: str = "ip or arp",
         loop: Optional[asyncio.AbstractEventLoop] = None,
+        own_ip: Optional[str] = None,
     ):
         self.bus    = bus
         self.iface  = iface        # None = Scapy picks the default
@@ -58,6 +58,7 @@ class PacketSniffer:
         self._running = False
 
         # Track seen IPs for NEW_DEVICE detection
+        self.own_ip = own_ip
         self._seen_ips: set[str] = set()
 
         # SYN flood tracking: {src_ip: [timestamps]}
@@ -113,12 +114,12 @@ class PacketSniffer:
             self._maybe_new_device(pkt[ARP].psrc, mac=pkt[ARP].hwsrc)
             return None   # ARP watcher handles the detail
 
-        if IP not in pkt and IPv6 not in pkt:
+        if IP not in pkt:
             return None
 
-        ip = pkt[IP] if IP in pkt else pkt[IPv6]
-        src = ip.src
-        dst = ip.dst
+        ip   = pkt[IP]
+        src  = ip.src
+        dst  = ip.dst
         size = len(pkt)
         now  = time.time()
 
@@ -140,9 +141,10 @@ class PacketSniffer:
             data["dst_port"] = tcp.dport
             data["flags"]    = str(tcp.flags)
 
-            # SYN flood heuristic
+            # SYN flood heuristic — skip own IP (port scanner causes false positives)
             if "S" in str(tcp.flags) and "A" not in str(tcp.flags):
-                severity = self._check_syn_flood(src, now)
+                if src != self.own_ip:
+                    severity = self._check_syn_flood(src, now)
 
         # UDP layer
         elif UDP in pkt:

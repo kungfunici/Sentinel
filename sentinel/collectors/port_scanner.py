@@ -78,6 +78,7 @@ class PortScanner:
         interval: int = 300,        # scan every 5 minutes
         connect_timeout: float = CONNECT_TIMEOUT,
         max_concurrent: int = MAX_CONCURRENT,
+        own_ip: Optional[str] = None,
     ):
         self.bus             = bus
         self.ports           = ports or DEFAULT_PORTS
@@ -94,6 +95,7 @@ class PortScanner:
         # Targets injected from ARP/sniffer discoveries
         self._targets: set[str] = set()
 
+        self.own_ip   = own_ip
         self._running = False
         self._task:   Optional[asyncio.Task] = None
 
@@ -110,6 +112,7 @@ class PortScanner:
         )
 
     async def stop(self) -> None:
+        self.own_ip   = own_ip
         self._running = False
         if self._task:
             self._task.cancel()
@@ -121,7 +124,7 @@ class PortScanner:
 
     def add_target(self, ip: str) -> None:
         """Called externally (e.g. from NEW_DEVICE events) to add scan targets."""
-        if is_private(ip):
+        if is_private(ip) and ip != self.own_ip:
             self._targets.add(ip)
 
     # ------------------------------------------------------------------ #
