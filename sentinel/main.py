@@ -31,6 +31,7 @@ from sentinel.core.enrichment import Enricher
 from sentinel.collectors.sniffer import PacketSniffer
 from sentinel.collectors.dns_monitor import DnsMonitor
 from sentinel.collectors.arp_watcher import ArpWatcher
+from sentinel.collectors.port_scanner import PortScanner
 
 console = Console()
 
@@ -172,6 +173,16 @@ async def display_loop(bus: EventBus, display: LiveDisplay) -> None:
                 display.add(event)
                 live.update(display.build_table())
 
+# appended by update
+async def _target_feeder(bus: EventBus, scanner: PortScanner) -> None:
+    """Feeds NEW_DEVICE events into the port scanner as targets."""
+    async with bus.subscribe(min_severity="info") as sub:
+        async for event in sub:
+            if event.type == EventType.NEW_DEVICE:
+                ip = event.data.get("ip", "")
+                if ip:
+                    scanner.add_target(ip)
+
 
 # ------------------------------------------------------------------ #
 #  Main                                                                #
@@ -200,16 +211,19 @@ async def run(args: argparse.Namespace, stop_event: asyncio.Event) -> None:
             blocklist_path=Path(args.blocklist) if args.blocklist else None,
         )
         arp     = ArpWatcher(bus, iface=args.iface, gateway_ip=args.gateway)
+        scanner = PortScanner(bus, interval=args.scan_interval)
 
         tasks = [
             asyncio.create_task(db_writer(bus, db),               name="db-writer"),
             asyncio.create_task(display_loop(bus, display),        name="cli-display"),
             asyncio.create_task(enrichment_loop(bus, db, enricher), name="enricher"),
+            asyncio.create_task(_target_feeder(bus, scanner),           name="target-feeder"),
         ]
 
         await sniffer.start()
         await dns.start()
         await arp.start()
+        await scanner.start()
 
         if sys.platform != "win32":
             loop = asyncio.get_running_loop()
@@ -227,6 +241,7 @@ async def run(args: argparse.Namespace, stop_event: asyncio.Event) -> None:
         await sniffer.stop()
         await dns.stop()
         await arp.stop()
+        await scanner.stop()
 
         for t in tasks:
             t.cancel()
@@ -244,6 +259,7 @@ def main() -> None:
     parser.add_argument("--db",        default="sentinel.db", help="SQLite database path")
     parser.add_argument("--blocklist", default=None,          help="Path to DNS blocklist file")
     parser.add_argument("--gateway",   default=None,          help="Gateway IP for spoofing detection (default: auto)")
+    parser.add_argument("--scan-interval", type=int, default=300, help="Port scan interval seconds (default: 300)")
     parser.add_argument("--verbose",   action="store_true",   help="Debug logging")
     args = parser.parse_args()
 
