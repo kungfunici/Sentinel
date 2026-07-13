@@ -70,7 +70,7 @@ class DhcpMonitor:
 
     def _analyze(self, pkt) -> list[Event]:
         try:
-            from scapy.layers.dhcp import BOOTP
+            from scapy.layers.dhcp import BOOTP, DHCP
             bootp = pkt[BOOTP]
         except ImportError:
             return []
@@ -90,7 +90,9 @@ class DhcpMonitor:
 
         msg_type = None
         server_id = None
-        for opt in bootp.options:
+        dhcp_layer = pkt[DHCP] if DHCP in pkt else None
+        dhcp_options = dhcp_layer.options if dhcp_layer else bootp.options
+        for opt in dhcp_options:
             if isinstance(opt, tuple) and len(opt) >= 2:
                 if opt[0] == 'message-type':
                     msg_type = opt[1]

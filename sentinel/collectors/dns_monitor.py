@@ -129,8 +129,10 @@ class DnsMonitor:
     def _parse_request(self, pkt, dns, src_ip: str, now: float) -> list[Event]:
         events = []
 
-        node = dns.qd
-        while node and isinstance(node, DNSQR):
+        qd_list = dns.qd if isinstance(dns.qd, list) else [dns.qd]
+        for node in qd_list:
+            if not isinstance(node, DNSQR):
+                continue
             try:
                 name  = node.qname.decode().rstrip(".")
                 qtype = self._qtype_name(node.qtype)
@@ -161,9 +163,6 @@ class DnsMonitor:
                 ))
             except Exception as exc:
                 log.debug("DNSQR parse error: %s", exc)
-
-            next_node = node.payload
-            node = next_node if isinstance(next_node, DNSQR) else None
 
         return events
 
@@ -198,17 +197,18 @@ class DnsMonitor:
 
         if rcode == 0 and dns.ancount > 0 and dns.qd:
             try:
-                qname = dns.qd.qname.decode().rstrip(".")
+                qd_list = dns.qd if isinstance(dns.qd, list) else [dns.qd]
+                qname = qd_list[0].qname.decode().rstrip(".") if qd_list else ""
                 ans_ips = set()
-                an = dns.an
-                while an and isinstance(an, DNSRR):
+                an_list = dns.an if isinstance(dns.an, list) else [dns.an]
+                for an in an_list:
+                    if not isinstance(an, DNSRR):
+                        continue
                     try:
                         if an.type in (1, 28):
                             ans_ips.add(str(an.rdata))
                     except Exception:
                         pass
-                    nxt = an.payload
-                    an = nxt if isinstance(nxt, DNSRR) else None
 
                 if ans_ips:
                     key = qname
@@ -240,10 +240,12 @@ class DnsMonitor:
                 log.debug("DNS answer parse error: %s", exc)
 
         if rcode != 0:
+            qd_list = dns.qd if isinstance(dns.qd, list) else [dns.qd]
+            qname_log = qd_list[0].qname.decode().rstrip(".") if qd_list else "?"
             log.info(
                 "DNS response %s from %s to %s (%s)",
                 rcode_names.get(rcode, f"rcode={rcode}"), src_ip, dst_ip,
-                dns.qd.qname.decode().rstrip(".") if dns.qd else "?",
+                qname_log,
             )
 
         return events

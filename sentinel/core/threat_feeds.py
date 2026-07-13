@@ -82,7 +82,7 @@ async def update_blocklist(
     if not blocklist_path:
         return 0
 
-    feeds = feeds or DEFAULT_FEEDS
+    feeds = DEFAULT_FEEDS if feeds is None else feeds
     enabled = [f for f in feeds if f.get("enabled", True)]
     if not enabled:
         return 0

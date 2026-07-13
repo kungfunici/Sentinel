@@ -236,6 +236,13 @@ class ArpWatcher:
         if pair in self._seen_pairs:
             return
         self._seen_pairs.add(pair)
+        events.append(Event(
+            type=EventType.NEW_DEVICE,
+            severity="info",
+            source="arp_watcher",
+            timestamp=now,
+            data={"ip": ip, "mac": mac},
+        ))
 
     @property
     def table(self) -> dict[str, list[str]]:

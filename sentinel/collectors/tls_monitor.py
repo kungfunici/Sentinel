@@ -197,9 +197,10 @@ class TlsMonitor:
             extensions.append(str(ext_type))
 
             if ext_type == 0x0000 and ext_data_len >= 5:
-                sni_list_len = (body[pos + 2] << 8) | body[pos + 3]
-                if pos + 5 + sni_list_len <= len(body):
-                    sni = body[pos + 5:pos + 5 + sni_list_len].decode("utf-8", errors="ignore")
+                name_type = body[pos + 2]
+                name_len = (body[pos + 3] << 8) | body[pos + 4]
+                if name_type == 0x00 and pos + 5 + name_len <= len(body):
+                    sni = body[pos + 5:pos + 5 + name_len].decode("utf-8", errors="ignore")
             elif ext_type == 0x000a and ext_data_len >= 2:
                 groups_len = (body[pos] << 8) | body[pos + 1]
                 for i in range(0, groups_len, 2):
