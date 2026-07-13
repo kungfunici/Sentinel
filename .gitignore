@@ -5,15 +5,30 @@ __pycache__/
 .venv/
 dist/
 build/
+.ruff_cache/
 
 # Sentinel runtime files
 sentinel.db
+sentinel.db-shm
+sentinel.db-wal
 oui.csv
 
-# PyCharm
-.idea/
+# Config (contains email credentials, never commit)
+sentinel.json
 
-# Windows
+# OS files
 Thumbs.db
 desktop.ini
-/projektstruktur.txt
+.DS_Store
+
+# IDE
+.idea/
+
+# Test / coverage
+.pytest_cache/
+.coverage
+htmlcov/
+coverage.xml
+
+# Extras
+projektstruktur.txt

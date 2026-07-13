@@ -16,6 +16,7 @@ class EventType(str, Enum):
     SENTINEL_STOP    = "sentinel.stop"
     ERROR            = "system.error"
     DHCP_ANOMALY     = "dhcp.anomaly"
+    DNS_ANOMALY      = "dns.anomaly"
     HTTP_REQUEST     = "http.request"
     ICMP_ANOMALY     = "icmp.anomaly"
     BANDWIDTH_REPORT = "bandwidth.report"

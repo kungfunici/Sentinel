@@ -1,5 +1,3 @@
-import asyncio
-import json
 import time
 import logging
 from pathlib import Path
@@ -10,7 +8,7 @@ from fastapi.responses import HTMLResponse
 from fastapi.templating import Jinja2Templates
 
 from sentinel.core.database import Database
-from sentinel.core.event_bus import EventBus, Event, EventType
+from sentinel.core.event_bus import EventBus, EventType
 
 log = logging.getLogger("sentinel.api")
 
@@ -18,7 +16,9 @@ TEMPLATES_DIR = Path(__file__).parent / "templates"
 templates     = Jinja2Templates(directory=str(TEMPLATES_DIR))
 
 
-def _datetimeformat(timestamp: float) -> str:
+def _datetimeformat(timestamp: float, utc: bool = False) -> str:
+    if utc:
+        return time.strftime("%Y-%m-%d %H:%M:%S", time.gmtime(timestamp))
     return time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(timestamp))
 
 
@@ -86,28 +86,42 @@ async def event_broadcaster() -> None:
             })
 
 
+def _utc(request: Request) -> bool:
+    return request.query_params.get("utc", "0") == "1"
+
+
 @app.get("/", response_class=HTMLResponse)
 async def dashboard(request: Request):
     stats = await _db.stats() if _db else {}
-    return templates.TemplateResponse(request, "index.html", {"stats": stats, "title": "Dashboard"})
+    utc = _utc(request)
+    return templates.TemplateResponse(request, "index.html", {"stats": stats, "title": "Dashboard", "utc": utc})
 
 
 @app.get("/devices", response_class=HTMLResponse)
 async def devices_page(request: Request):
     devices = await _db.query_devices() if _db else []
-    return templates.TemplateResponse(request, "devices.html", {"devices": devices, "title": "Devices"})
+    utc = _utc(request)
+    return templates.TemplateResponse(request, "devices.html", {"devices": devices, "title": "Devices", "utc": utc})
 
 
 @app.get("/events", response_class=HTMLResponse)
 async def events_page(request: Request, severity: Optional[str] = None):
     events = await _db.query_events(severity=severity, limit=100) if _db else []
-    return templates.TemplateResponse(request, "events.html", {"events": events, "severity": severity, "title": "Events"})
+    utc = _utc(request)
+    return templates.TemplateResponse(request, "events.html", {"events": events, "severity": severity, "title": "Events", "utc": utc})
 
 
 @app.get("/dns", response_class=HTMLResponse)
 async def dns_page(request: Request, blocked: bool = False):
     rows = await _db.query_dns(blocked_only=blocked, limit=100) if _db else []
-    return templates.TemplateResponse(request, "dns.html", {"queries": rows, "blocked": blocked, "title": "DNS"})
+    utc = _utc(request)
+    return templates.TemplateResponse(request, "dns.html", {"queries": rows, "blocked": blocked, "title": "DNS", "utc": utc})
+
+
+@app.get("/topology", response_class=HTMLResponse)
+async def topology_page(request: Request):
+    utc = _utc(request)
+    return templates.TemplateResponse(request, "topology.html", {"title": "Topology", "utc": utc})
 
 
 @app.get("/api/stats")
@@ -134,6 +148,38 @@ async def api_dns(blocked: bool = False, limit: int = 100):
     return await _db.query_dns(blocked_only=blocked, limit=limit) if _db else []
 
 
+@app.get("/api/topology")
+async def api_topology():
+    devices = await _db.query_devices() if _db else []
+    connections = []
+    if _db:
+        rows = await _db._conn.execute_fetchall(
+            "SELECT src_ip, dst_ip, COUNT(*) as count FROM packets GROUP BY src_ip, dst_ip ORDER BY count DESC LIMIT 200"
+        )
+        connections = [dict(r) for r in rows]
+
+    gateway_ip = None
+    ip_connections = {}
+    for c in connections:
+        ip_connections[c["src_ip"]] = ip_connections.get(c["src_ip"], 0) + c["count"]
+        ip_connections[c["dst_ip"]] = ip_connections.get(c["dst_ip"], 0) + c["count"]
+    if ip_connections:
+        gateway_ip = max(ip_connections, key=ip_connections.get)
+
+    device_list = []
+    for d in devices:
+        device_list.append({
+            "ip": d["ip"],
+            "mac": d.get("mac"),
+            "hostname": d.get("hostname"),
+            "vendor": d.get("vendor"),
+            "flagged": bool(d["flagged"]),
+            "is_gateway": d["ip"] == gateway_ip,
+        })
+
+    return {"devices": device_list, "connections": connections}
+
+
 @app.post("/api/devices/{ip}/flag")
 async def flag_device(ip: str, flagged: bool = True):
     if _db:
@@ -154,17 +200,20 @@ async def websocket_events(ws: WebSocket):
 @app.get("/htmx/stats", response_class=HTMLResponse)
 async def htmx_stats(request: Request):
     stats = await _db.stats() if _db else {}
-    return templates.TemplateResponse(request, "partials/stats.html", {"stats": stats})
+    utc = _utc(request)
+    return templates.TemplateResponse(request, "partials/stats.html", {"stats": stats, "utc": utc})
 
 
 @app.get("/htmx/alerts", response_class=HTMLResponse)
 async def htmx_alerts(request: Request):
     events = await _db.query_events(severity="warning", limit=10) if _db else []
     critical = await _db.query_events(severity="critical", limit=10) if _db else []
-    return templates.TemplateResponse(request, "partials/alerts.html", {"alerts": critical + events})
+    utc = _utc(request)
+    return templates.TemplateResponse(request, "partials/alerts.html", {"alerts": critical + events, "utc": utc})
 
 
 @app.get("/htmx/devices", response_class=HTMLResponse)
 async def htmx_devices(request: Request):
     devices = await _db.query_devices() if _db else []
-    return templates.TemplateResponse(request, "partials/devices.html", {"devices": devices[:10]})
+    utc = _utc(request)
+    return templates.TemplateResponse(request, "partials/devices.html", {"devices": devices[:10], "utc": utc})

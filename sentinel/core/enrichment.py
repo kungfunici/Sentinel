@@ -11,7 +11,6 @@ log = logging.getLogger("sentinel.enrichment")
 
 OUI_URL      = "https://standards-oui.ieee.org/oui/oui.csv"
 OUI_FALLBACK = "https://raw.githubusercontent.com/wireshark/wireshark/master/manuf"
-OUI_PATH     = Path("oui.csv")
 OUI_MAX_AGE  = 60 * 60 * 24 * 30
 
 
@@ -45,7 +44,7 @@ def _parse_wireshark_manuf(text: str) -> dict[str, str]:
     return result
 
 
-async def _download_oui() -> dict[str, str]:
+async def _download_oui(path: Path) -> dict[str, str]:
     import urllib.request
 
     log.info("Downloading OUI database from IEEE...")
@@ -62,8 +61,8 @@ async def _download_oui() -> dict[str, str]:
         text = await loop.run_in_executor(None, _fetch)
         db   = _parse_oui_csv(text)
         if db:
-            OUI_PATH.write_text(text, encoding="utf-8")
-            log.info("OUI database saved: %d vendors (%s)", len(db), OUI_PATH)
+            path.write_text(text, encoding="utf-8")
+            log.info("OUI database saved: %d vendors (%s)", len(db), path)
             return db
     except Exception as exc:
         log.warning("IEEE OUI download failed: %s — trying Wireshark fallback", exc)
@@ -90,11 +89,11 @@ async def _download_oui() -> dict[str, str]:
     return {}
 
 
-def _load_oui_from_disk() -> dict[str, str]:
-    if not OUI_PATH.exists():
+def _load_oui_from_disk(path: Path) -> dict[str, str]:
+    if not path.exists():
         return {}
     try:
-        text = OUI_PATH.read_text(encoding="utf-8")
+        text = path.read_text(encoding="utf-8")
         if "Assignment" in text[:200]:
             db = _parse_oui_csv(text)
         else:
@@ -107,25 +106,26 @@ def _load_oui_from_disk() -> dict[str, str]:
 
 
 class Enricher:
-    def __init__(self, db=None, dns_timeout: float = 2.0):
+    def __init__(self, db=None, dns_timeout: float = 2.0, oui_path: str = "oui.csv"):
         self._db          = db
         self._oui:  dict[str, str] = {}
         self._cache: dict[str, dict] = {}
         self._dns_timeout = dns_timeout
         self._dns_sem     = asyncio.Semaphore(10)
+        self._oui_path    = Path(oui_path)
 
     async def setup(self) -> None:
-        self._oui = _load_oui_from_disk()
+        self._oui = _load_oui_from_disk(self._oui_path)
 
         needs_download = not self._oui
-        if OUI_PATH.exists():
-            age = time.time() - OUI_PATH.stat().st_mtime
+        if self._oui_path.exists():
+            age = time.time() - self._oui_path.stat().st_mtime
             if age > OUI_MAX_AGE:
                 log.info("OUI database is %.0f days old, refreshing...", age / 86400)
                 needs_download = True
 
         if needs_download:
-            self._oui = await _download_oui()
+            self._oui = await _download_oui(self._oui_path)
 
     def vendor_for_mac(self, mac: Optional[str]) -> Optional[str]:
         if not mac:

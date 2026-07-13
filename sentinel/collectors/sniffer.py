@@ -1,11 +1,11 @@
 import asyncio
-import threading
 import time
 import logging
 from typing import Optional
 
 from scapy.layers.inet import IP, TCP, UDP, ICMP
-from scapy.layers.l2 import ARP, Ether
+from scapy.layers.inet6 import IPv6, ICMPv6EchoRequest
+from scapy.layers.l2 import ARP
 from scapy.sendrecv import AsyncSniffer
 
 from sentinel.core.event_bus import Event, EventBus, EventType
@@ -22,7 +22,7 @@ class PacketSniffer:
         self,
         bus: EventBus,
         iface: Optional[str] = None,
-        bpf_filter: str = "ip or arp",
+        bpf_filter: str = "ip or ip6 or arp",
         loop: Optional[asyncio.AbstractEventLoop] = None,
         own_ip: Optional[str] = None,
     ):
@@ -73,22 +73,29 @@ class PacketSniffer:
             self._maybe_new_device(pkt[ARP].psrc, mac=pkt[ARP].hwsrc)
             return None
 
-        if IP not in pkt:
+        if IP in pkt:
+            ip_layer = pkt[IP]
+            is_v6 = False
+        elif IPv6 in pkt:
+            ip_layer = pkt[IPv6]
+            is_v6 = True
+        else:
             return None
 
-        ip   = pkt[IP]
-        src  = ip.src
-        dst  = ip.dst
+        src  = ip_layer.src
+        dst  = ip_layer.dst
         size = len(pkt)
         now  = time.time()
+        proto = ip_layer.nh if is_v6 else ip_layer.proto
 
         self._maybe_new_device(src)
 
         data: dict = {
-            "src_ip":   src,
-            "dst_ip":   dst,
-            "protocol": self._proto_name(ip.proto),
-            "size":     size,
+            "src_ip":    src,
+            "dst_ip":    dst,
+            "protocol":  self._proto_name(proto),
+            "size":      size,
+            "ip_version": 6 if is_v6 else 4,
         }
         severity = "info"
 
@@ -107,8 +114,11 @@ class PacketSniffer:
             data["src_port"] = udp.sport
             data["dst_port"] = udp.dport
 
-        elif ICMP in pkt:
+        elif ICMP in pkt and not is_v6:
             data["icmp_type"] = pkt[ICMP].type
+
+        elif is_v6 and ICMPv6EchoRequest in pkt:
+            data["icmp_type"] = 128
 
         if size > LARGE_PACKET_BYTES and severity != "critical":
             severity = "warning"
@@ -123,7 +133,9 @@ class PacketSniffer:
         )
 
     def _maybe_new_device(self, ip: str, mac: Optional[str] = None) -> None:
-        if not ip or ip in self._seen_ips or ip.startswith("0.") or ip == "255.255.255.255":
+        if not ip or ip in self._seen_ips:
+            return
+        if ip.startswith("0.") or ip == "255.255.255.255" or ip == "ff02::1" or ip.startswith("fe80::"):
             return
         self._seen_ips.add(ip)
         log.info("New device seen: %s", ip)

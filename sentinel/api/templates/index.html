@@ -74,9 +74,8 @@
 </div>
 
 <script>
-const _origHandle = window.handleLiveEvent;
-window.handleLiveEvent = function(event) {
-    if (_origHandle) _origHandle(event);
+window.addEventListener('sentinel:event', function(e) {
+    const event = e.detail;
     const feed = document.getElementById('live-feed');
     if (!feed) return;
     const row   = document.createElement('div');
@@ -91,6 +90,6 @@ window.handleLiveEvent = function(event) {
                      <span class="truncate">${desc}</span>`;
     feed.prepend(row);
     while (feed.children.length > 50) feed.lastChild.remove();
-};
+});
 </script>
 {% endblock %}

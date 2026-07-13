@@ -23,6 +23,7 @@ dev = ["pytest", "pytest-asyncio", "black", "ruff"]
 [project.scripts]
 sentinel = "sentinel.main:main"
 sentinel-query = "sentinel.cli.query:main"
+sentinel-shell = "sentinel.cli.shell:main"
 
 [tool.ruff]
 line-length = 100

@@ -22,7 +22,7 @@
         <tbody class="divide-y divide-border font-mono text-xs">
         {% for q in queries %}
             <tr class="hover:bg-white/5 transition-colors {% if q.blocked %}bg-red-900/10{% endif %}">
-                <td class="px-4 py-2.5 text-gray-500">{{ q.timestamp | datetimeformat }}</td>
+                <td class="px-4 py-2.5 text-gray-500">{{ q.timestamp | datetimeformat(utc=utc) }}</td>
                 <td class="px-4 py-2.5 text-gray-300">{{ q.src_ip }}</td>
                 <td class="px-4 py-2.5 text-gray-200">{{ q.query_name }}</td>
                 <td class="px-4 py-2.5 text-gray-500">{{ q.query_type }}</td>

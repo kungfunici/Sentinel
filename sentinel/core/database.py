@@ -281,6 +281,15 @@ class Database:
         result["dns_blocked"] = blocked[0]["n"]
         return result
 
+    async def cleanup_old_events(self, retention_days: int) -> dict:
+        cutoff = time.time() - (retention_days * 86400)
+        result = {}
+        for table in ("events", "dns_queries", "packets"):
+            cursor = await self._conn.execute(f"DELETE FROM {table} WHERE timestamp < ?", (cutoff,))
+            result[table] = cursor.rowcount
+        await self._conn.commit()
+        return result
+
     async def flag_device(self, ip: str, flagged: bool = True) -> None:
         assert self._conn
         await self._conn.execute(

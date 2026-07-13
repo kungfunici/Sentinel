@@ -1,0 +1,44 @@
+{
+    "_note": "Copy this file to sentinel.json and fill in your settings. sentinel.json is gitignored.",
+
+    "smtp_server": "",
+    "smtp_port": 587,
+    "smtp_user": "",
+    "smtp_password": "",
+    "smtp_ssl": false,
+    "email_from": "sentinel@localhost",
+    "email_to": "",
+
+    "iface": null,
+    "gateway": null,
+    "blocklist": null,
+    "host": "0.0.0.0",
+    "port": 8888,
+    "scan_interval": 60,
+    "verbose": false,
+    "daemon": false,
+
+    "rules": [
+        {
+            "name": "ARP spoofing burst",
+            "match": {"type": "arp.anomaly", "severity": "critical"},
+            "threshold": 3,
+            "window": 120,
+            "action": {"escalate_to": "critical"}
+        },
+        {
+            "name": "DNS blocked spike",
+            "match": {"type": "dns.blocked"},
+            "threshold": 10,
+            "window": 60,
+            "action": {"escalate_to": "critical"}
+        },
+        {
+            "name": "Port scan on new device",
+            "match": {"type": "port.scan_result", "severity": "warning"},
+            "threshold": 5,
+            "window": 300,
+            "action": {"escalate_to": "critical"}
+        }
+    ]
+}

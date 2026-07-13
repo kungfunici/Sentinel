@@ -4,7 +4,7 @@ import time
 from pathlib import Path
 from typing import Optional
 
-from scapy.layers.dns import DNS, DNSQR
+from scapy.layers.dns import DNS, DNSQR, DNSRR
 from scapy.layers.inet import UDP, IP
 from scapy.sendrecv import AsyncSniffer
 
@@ -20,6 +20,9 @@ BUILTIN_BLOCKLIST: set[str] = {
     "ads.google.com",
     "tracking.example.com",
 }
+
+NXDOMAIN_FLOOD_WINDOW = 10
+NXDOMAIN_FLOOD_THRESHOLD = 20
 
 
 class DnsMonitor:
@@ -45,6 +48,10 @@ class DnsMonitor:
 
         self._total_queries = 0
         self._total_blocked = 0
+        self._total_anomaly = 0
+
+        self._nxdomain_counts: dict[str, list[float]] = {}
+        self._known_answers: dict[str, set[str]] = {}
 
         if blocklist_path:
             self._load_blocklist(blocklist_path)
@@ -74,8 +81,8 @@ class DnsMonitor:
         if self._sniffer:
             self._sniffer.stop()
         log.info(
-            "DNS monitor stopped. queries=%d blocked=%d",
-            self._total_queries, self._total_blocked,
+            "DNS monitor stopped. queries=%d blocked=%d anomalies=%d",
+            self._total_queries, self._total_blocked, self._total_anomaly,
         )
 
     def _on_packet(self, pkt) -> None:
@@ -88,28 +95,38 @@ class DnsMonitor:
         except Exception as exc:
             log.debug("DNS parse error: %s", exc)
 
+    def _resolve_ip(self, pkt) -> tuple[Optional[str], Optional[str]]:
+        try:
+            from scapy.layers.inet6 import IPv6
+            if IP in pkt:
+                return pkt[IP].src, pkt[IP].dst
+            elif IPv6 in pkt:
+                return pkt[IPv6].src, pkt[IPv6].dst
+        except ImportError:
+            if IP in pkt:
+                return pkt[IP].src, pkt[IP].dst
+        return None, None
+
     def _parse_dns(self, pkt) -> list[Event]:
         if DNS not in pkt:
             return []
 
-        try:
-            from scapy.layers.inet6 import IPv6
-            if IP in pkt:
-                src_ip = pkt[IP].src
-            elif IPv6 in pkt:
-                src_ip = pkt[IPv6].src
-            else:
-                return []
-        except ImportError:
-            if IP not in pkt:
-                return []
-            src_ip = pkt[IP].src
-
-        dns = pkt[DNS]
-        if dns.qr != 0:
+        src_ip, dst_ip = self._resolve_ip(pkt)
+        if not src_ip:
             return []
 
-        now    = time.time()
+        dns = pkt[DNS]
+        now = time.time()
+        events = []
+
+        if dns.qr == 0:
+            events = self._parse_request(pkt, dns, src_ip, now)
+        else:
+            events = self._parse_response(pkt, dns, src_ip, dst_ip, now)
+
+        return events
+
+    def _parse_request(self, pkt, dns, src_ip: str, now: float) -> list[Event]:
         events = []
 
         node = dns.qd
@@ -147,6 +164,87 @@ class DnsMonitor:
 
             next_node = node.payload
             node = next_node if isinstance(next_node, DNSQR) else None
+
+        return events
+
+    def _parse_response(self, pkt, dns, src_ip: str, dst_ip: str, now: float) -> list[Event]:
+        events = []
+        rcode = dns.rcode
+        rcode_names = {0: "NoError", 1: "FormErr", 2: "ServFail", 3: "NXDOMAIN", 4: "NotImp", 5: "Refused"}
+
+        if rcode == 3:
+            times = self._nxdomain_counts.setdefault(dst_ip, [])
+            times.append(now)
+            cutoff = now - NXDOMAIN_FLOOD_WINDOW
+            self._nxdomain_counts[dst_ip] = [t for t in times if t > cutoff]
+            count = len(self._nxdomain_counts[dst_ip])
+            if count == NXDOMAIN_FLOOD_THRESHOLD:
+                self._total_anomaly += 1
+                log.warning("NXDOMAIN flood to %s: %d responses in %ds", dst_ip, count, NXDOMAIN_FLOOD_WINDOW)
+                events.append(Event(
+                    type=EventType.DNS_ANOMALY,
+                    severity="warning",
+                    source="dns_monitor",
+                    timestamp=now,
+                    data={
+                        "anomaly": "nxdomain_flood",
+                        "client_ip": dst_ip,
+                        "server_ip": src_ip,
+                        "count": count,
+                        "window_secs": NXDOMAIN_FLOOD_WINDOW,
+                        "description": f"NXDOMAIN flood: {count} NXDOMAIN responses to {dst_ip} in {NXDOMAIN_FLOOD_WINDOW}s",
+                    },
+                ))
+
+        if rcode == 0 and dns.ancount > 0 and dns.qd:
+            try:
+                qname = dns.qd.qname.decode().rstrip(".")
+                ans_ips = set()
+                an = dns.an
+                while an and isinstance(an, DNSRR):
+                    try:
+                        if an.type in (1, 28):
+                            ans_ips.add(str(an.rdata))
+                    except Exception:
+                        pass
+                    nxt = an.payload
+                    an = nxt if isinstance(nxt, DNSRR) else None
+
+                if ans_ips:
+                    key = qname
+                    if key in self._known_answers:
+                        prev = self._known_answers[key]
+                        if prev and prev != ans_ips and not prev.intersection(ans_ips):
+                            self._total_anomaly += 1
+                            log.warning(
+                                "DNS answer changed for %s: was %s, now %s",
+                                qname, prev, ans_ips,
+                            )
+                            events.append(Event(
+                                type=EventType.DNS_ANOMALY,
+                                severity="warning",
+                                source="dns_monitor",
+                                timestamp=now,
+                                data={
+                                    "anomaly": "answer_change",
+                                    "query_name": qname,
+                                    "previous_answers": list(prev),
+                                    "current_answers": list(ans_ips),
+                                    "server_ip": src_ip,
+                                    "client_ip": dst_ip,
+                                    "description": f"DNS answer changed for {qname}: {prev} → {ans_ips} (possible poisoning)",
+                                },
+                            ))
+                    self._known_answers[key] = ans_ips
+            except Exception as exc:
+                log.debug("DNS answer parse error: %s", exc)
+
+        if rcode != 0:
+            log.info(
+                "DNS response %s from %s to %s (%s)",
+                rcode_names.get(rcode, f"rcode={rcode}"), src_ip, dst_ip,
+                dns.qd.qname.decode().rstrip(".") if dns.qd else "?",
+            )
 
         return events
 
@@ -210,6 +308,7 @@ class DnsMonitor:
         return {
             "total_queries":  self._total_queries,
             "total_blocked":  self._total_blocked,
+            "total_anomaly":  self._total_anomaly,
             "blocklist_size": len(self._blocklist) + len(self._wildcards),
         }
 

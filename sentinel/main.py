@@ -1,5 +1,6 @@
 import asyncio
 import argparse
+import json
 import logging
 import uvicorn
 import signal
@@ -7,6 +8,7 @@ import socket
 import sys
 import time
 from pathlib import Path
+from typing import Optional
 
 import rich.logging
 from rich.console import Console
@@ -18,6 +20,7 @@ from rich.text import Text
 from sentinel.core.event_bus import Event, EventBus, EventType
 from sentinel.core.database import Database
 from sentinel.core.enrichment import Enricher
+from sentinel.core.notifier import EmailConfig, EmailNotifier
 from sentinel.collectors.sniffer import PacketSniffer
 from sentinel.collectors.dns_monitor import DnsMonitor
 from sentinel.collectors.arp_watcher import ArpWatcher
@@ -25,8 +28,12 @@ from sentinel.collectors.port_scanner import PortScanner
 from sentinel.collectors.dhcp_monitor import DhcpMonitor
 from sentinel.collectors.http_monitor import HttpMonitor
 from sentinel.collectors.icmp_monitor import IcmpMonitor
+from sentinel.collectors.tls_monitor import TlsMonitor
 from sentinel.collectors.bandwidth_tracker import BandwidthTracker
 from sentinel.api.app import app as fastapi_app, init as api_init, event_broadcaster
+from sentinel.cli.shell import SentinelShell
+from sentinel.core.threat_feeds import update_blocklist, DEFAULT_FEEDS
+from sentinel.core.rules_engine import RulesEngine, rule_from_dict
 
 console = Console()
 
@@ -44,6 +51,21 @@ def setup_logging(verbose: bool = False) -> None:
 
 
 log = logging.getLogger("sentinel")
+
+CONFIG_FILE = "sentinel.json"
+
+
+def load_json_config(path: str = CONFIG_FILE) -> dict:
+    try:
+        with open(path, encoding="utf-8") as f:
+            cfg = json.load(f)
+        log.info("Loaded config from %s", path)
+        return cfg
+    except FileNotFoundError:
+        return {}
+    except json.JSONDecodeError as e:
+        log.warning("Invalid config file %s: %s", path, e)
+        return {}
 
 
 async def db_writer(bus: EventBus, db: Database) -> None:
@@ -101,6 +123,7 @@ EVENT_ICON = {
     EventType.PORT_SCAN_RESULT: "SCN",
     EventType.ERROR:            "ERR",
     EventType.DHCP_ANOMALY:     "DHP",
+    EventType.DNS_ANOMALY:      "DNS",
     EventType.HTTP_REQUEST:     "HTTP",
     EventType.ICMP_ANOMALY:     "ICM",
     EventType.BANDWIDTH_REPORT: "BND",
@@ -159,6 +182,8 @@ def _format_detail(ev: Event) -> str:
         return f"New host: {d.get('ip','?')}{mac}"
     if ev.type == EventType.ARP_ANOMALY:
         return d.get("description", str(d)[:120])
+    if ev.type == EventType.DNS_ANOMALY:
+        return d.get("description", str(d)[:120])
     if ev.type == EventType.DHCP_ANOMALY:
         return d.get("description", str(d)[:120])
     if ev.type == EventType.HTTP_REQUEST:
@@ -201,10 +226,37 @@ async def _target_feeder(bus: EventBus, scanner: PortScanner) -> None:
                     scanner.add_target(ip)
 
 
+async def cleanup_loop(db: Database, retention_days: int, interval: int = 3600) -> None:
+    while True:
+        try:
+            deleted = await db.cleanup_old_events(retention_days)
+            total = sum(deleted.values())
+            if total:
+                log.info("Cleanup: removed %d old rows (retention=%dd)", total, retention_days)
+        except Exception as exc:
+            log.warning("Cleanup failed: %s", exc)
+        await asyncio.sleep(interval)
+
+
+async def feeds_update_loop(
+    blocklist_path: Optional[Path],
+    feeds: Optional[list[dict]],
+    interval: int = 86400,
+) -> None:
+    while True:
+        try:
+            added = await update_blocklist(blocklist_path, feeds)
+            if added:
+                log.info("Threat feeds: %d new domains added", added)
+        except Exception as exc:
+            log.warning("Threat feed update failed: %s", exc)
+        await asyncio.sleep(interval)
+
+
 async def run(args: argparse.Namespace, stop_event: asyncio.Event) -> None:
     bus      = EventBus()
     display  = LiveDisplay()
-    enricher = Enricher()
+    enricher = Enricher(oui_path=args.oui_path)
 
     own_ip = None
     gateway_ip = args.gateway
@@ -222,7 +274,8 @@ async def run(args: argparse.Namespace, stop_event: asyncio.Event) -> None:
 
     if not gateway_ip:
         try:
-            import subprocess, re
+            import subprocess
+            import re
             if sys.platform == "win32":
                 out = subprocess.check_output("ipconfig", text=True, encoding="utf-8", errors="ignore")
                 match = re.search(r"Standardgateway[^:]*:[^\d]*(\d+\.\d+\.\d+\.\d+)", out)
@@ -259,19 +312,57 @@ async def run(args: argparse.Namespace, stop_event: asyncio.Event) -> None:
         dhcp    = DhcpMonitor(bus, iface=args.iface)
         http    = HttpMonitor(bus, iface=args.iface)
         icmp    = IcmpMonitor(bus, iface=args.iface)
+        tls     = TlsMonitor(bus, iface=args.iface)
         bw      = BandwidthTracker(bus)
 
+        email_notifier = None
+        if args.smtp_server:
+            email_cfg = EmailConfig(
+                server=args.smtp_server,
+                port=args.smtp_port,
+                username=args.smtp_user,
+                password=args.smtp_password,
+                use_tls=not args.smtp_ssl,
+                from_addr=args.email_from,
+                to_addr=args.email_to,
+            )
+            email_notifier = EmailNotifier(bus, email_cfg)
+
+        rules_engine = None
+        raw_rules = load_json_config().get("rules", [])
+        if raw_rules:
+            parsed = [rule_from_dict(r) for r in raw_rules]
+            rules_engine = RulesEngine(bus, parsed)
+
         tasks = [
-            asyncio.create_task(db_writer(bus, db),               name="db-writer"),
-            asyncio.create_task(display_loop(bus, display),        name="cli-display"),
+            asyncio.create_task(cleanup_loop(db, args.retention_days), name="cleanup"),
+            asyncio.create_task(db_writer(bus, db),                name="db-writer"),
             asyncio.create_task(enrichment_loop(bus, db, enricher), name="enricher"),
-            asyncio.create_task(_target_feeder(bus, scanner),           name="target-feeder"),
-            asyncio.create_task(event_broadcaster(),                       name="ws-broadcaster"),
+            asyncio.create_task(_target_feeder(bus, scanner),       name="target-feeder"),
+            asyncio.create_task(event_broadcaster(),                name="ws-broadcaster"),
             asyncio.create_task(
                 _run_uvicorn(args.host, args.port),
                 name="api-server",
             ),
         ]
+
+        if email_notifier:
+            tasks.insert(0, asyncio.create_task(email_notifier.start(), name="email-notifier"))
+        if rules_engine:
+            tasks.insert(0, asyncio.create_task(rules_engine.start(), name="rules-engine"))
+
+        if args.threat_feeds and args.blocklist:
+            tasks.insert(0, asyncio.create_task(
+                feeds_update_loop(Path(args.blocklist) if args.blocklist else None, DEFAULT_FEEDS),
+                name="threat-feeds",
+            ))
+
+        if args.daemon:
+            tasks.insert(0, asyncio.create_task(display_loop(bus, display), name="cli-display"))
+            console.print("[dim]Dashboard: http://localhost:{0}[/]".format(args.port))
+        else:
+            shell = SentinelShell(db, bus, blocklist_path=args.blocklist, stop_event=stop_event)
+            tasks.insert(0, asyncio.create_task(shell.run(), name="shell"))
 
         await sniffer.start()
         await dns.start()
@@ -280,6 +371,7 @@ async def run(args: argparse.Namespace, stop_event: asyncio.Event) -> None:
         await dhcp.start()
         await http.start()
         await icmp.start()
+        await tls.start()
         await bw.start()
 
         if sys.platform != "win32":
@@ -289,6 +381,11 @@ async def run(args: argparse.Namespace, stop_event: asyncio.Event) -> None:
                 stop_event.set()
             for sig in (signal.SIGINT, signal.SIGTERM):
                 loop.add_signal_handler(sig, _shutdown)
+        else:
+            def _win_shutdown(sig, frame):
+                console.print("\n[yellow]Shutting down Sentinel...[/]")
+                stop_event.set()
+            signal.signal(signal.SIGINT, _win_shutdown)
 
         try:
             await stop_event.wait()
@@ -302,6 +399,7 @@ async def run(args: argparse.Namespace, stop_event: asyncio.Event) -> None:
         await dhcp.stop()
         await http.stop()
         await icmp.stop()
+        await tls.stop()
         await bw.stop()
 
         for t in tasks:
@@ -314,21 +412,65 @@ async def run(args: argparse.Namespace, stop_event: asyncio.Event) -> None:
         console.print("[bold]ARP stats:[/]", arp.stats)
 
 
+def _apply_config_defaults(parser: argparse.ArgumentParser, config: dict) -> None:
+    mapping = {
+        "iface": "iface", "db": "db", "blocklist": "blocklist",
+        "gateway": "gateway", "host": "host", "port": "port",
+        "scan_interval": "scan_interval", "oui_path": "oui_path",
+        "verbose": "verbose", "daemon": "daemon",
+        "retention_days": "retention_days",
+        "smtp_server": "smtp_server", "smtp_port": "smtp_port",
+        "smtp_user": "smtp_user", "smtp_password": "smtp_password",
+        "smtp_ssl": "smtp_ssl",
+        "email_from": "email_from", "email_to": "email_to",
+        "threat_feeds": "threat_feeds",
+    }
+    overrides = {}
+    for cfg_key, arg_key in mapping.items():
+        val = config.get(cfg_key)
+        if val is not None:
+            overrides[arg_key] = val
+    if overrides:
+        parser.set_defaults(**overrides)
+
+
 def main() -> None:
+    config = load_json_config()
+
     parser = argparse.ArgumentParser(description="Sentinel — local network security monitor")
-    parser.add_argument("--iface",     default=None,          help="Network interface (default: auto)")
-    parser.add_argument("--db",        default="sentinel.db", help="SQLite database path")
-    parser.add_argument("--blocklist", default=None,          help="Path to DNS blocklist file")
-    parser.add_argument("--gateway",   default=None,          help="Gateway IP for spoofing detection (default: auto)")
-    parser.add_argument("--host", default="0.0.0.0", help="API host (default: 0.0.0.0)")
-    parser.add_argument("--port", type=int, default=8888, help="API port (default: 8888)")
-    parser.add_argument("--scan-interval", type=int, default=60, help="Port scan interval in seconds (default: 60)")
-    parser.add_argument("--verbose",   action="store_true",   help="Debug logging")
+    parser.add_argument("--iface",       default=None,             help="Network interface (default: auto)")
+    parser.add_argument("--db",          default="sentinel.db",    help="SQLite database path")
+    parser.add_argument("--blocklist",   default=None,             help="Path to DNS blocklist file")
+    parser.add_argument("--gateway",     default=None,             help="Gateway IP for spoofing detection (default: auto)")
+    parser.add_argument("--host",        default="0.0.0.0",        help="API host (default: 0.0.0.0)")
+    parser.add_argument("--port",        type=int, default=8888,   help="API port (default: 8888)")
+    parser.add_argument("--scan-interval", type=int, default=60,   help="Port scan interval in seconds (default: 60)")
+    parser.add_argument("--oui-path",    default="oui.csv",        help="Path to OUI vendor database (default: oui.csv)")
+    parser.add_argument("--verbose",     action="store_true",      help="Debug logging")
+    parser.add_argument("--retention-days", type=int, default=30, help="Delete events older than N days (default: 30)")
+    parser.add_argument("--threat-feeds", action="store_true",      help="Enable automatic blocklist updates from threat intelligence feeds")
+
+    parser.add_argument("--daemon",      action="store_true",      help="Run headless (no interactive shell, just dashboard + live TUI)")
+
+    email_group = parser.add_argument_group("Email notifications")
+    email_group.add_argument("--smtp-server",   default=None,      help="SMTP server hostname")
+    email_group.add_argument("--smtp-port",     type=int, default=587, help="SMTP server port (default: 587)")
+    email_group.add_argument("--smtp-user",     default=None,      help="SMTP username")
+    email_group.add_argument("--smtp-password", default=None,      help="SMTP password")
+    email_group.add_argument("--smtp-ssl",      action="store_true", help="Use SMTP over SSL (port 465) instead of STARTTLS")
+    email_group.add_argument("--email-from",    default="sentinel@localhost", help="From address for email alerts")
+    email_group.add_argument("--email-to",      default="",        help="Recipient address for email alerts")
+
+    _apply_config_defaults(parser, config)
     args = parser.parse_args()
 
     setup_logging(args.verbose)
-    console.print("[bold green]Sentinel starting...[/] (Ctrl+C to stop)")
-    console.print(f"[dim]Dashboard: http://localhost:{args.port}[/]")
+
+    if args.daemon:
+        console.print("[bold green]Sentinel starting (daemon mode)...[/] (Ctrl+C to stop)")
+    else:
+        console.print("[bold green]Sentinel starting...[/] (Ctrl+C to stop)")
+        console.print("[dim]Interactive shell available — type 'help' for commands.[/]")
 
     stop_event = asyncio.Event()
 

@@ -45,9 +45,14 @@
         <a href="/"        class="px-3 py-1.5 rounded-md hover:bg-white/5 {% if title == 'Dashboard' %}bg-white/10{% endif %} transition-colors">Dashboard</a>
         <a href="/devices" class="px-3 py-1.5 rounded-md hover:bg-white/5 {% if title == 'Devices' %}bg-white/10{% endif %} transition-colors">Devices</a>
         <a href="/events"  class="px-3 py-1.5 rounded-md hover:bg-white/5 {% if title == 'Events' %}bg-white/10{% endif %} transition-colors">Events</a>
-        <a href="/dns"     class="px-3 py-1.5 rounded-md hover:bg-white/5 {% if title == 'DNS' %}bg-white/10{% endif %} transition-colors">DNS</a>
+        <a href="/dns"      class="px-3 py-1.5 rounded-md hover:bg-white/5 {% if title == 'DNS' %}bg-white/10{% endif %} transition-colors">DNS</a>
+        <a href="/topology" class="px-3 py-1.5 rounded-md hover:bg-white/5 {% if title == 'Topology' %}bg-white/10{% endif %} transition-colors">Topology</a>
     </div>
-    <div id="ws-status" class="text-xs text-gray-500">connecting...</div>
+    <div class="flex items-center gap-3">
+        <a href="?utc=0" class="text-xs px-2 py-0.5 rounded border border-border hover:bg-white/5 {% if not utc %}bg-white/10 border-white/20{% endif %} transition-colors">Local</a>
+        <a href="?utc=1" class="text-xs px-2 py-0.5 rounded border border-border hover:bg-white/5 {% if utc %}bg-white/10 border-white/20{% endif %} transition-colors">UTC</a>
+        <span id="ws-status" class="text-xs text-gray-500">connecting...</span>
+    </div>
 </nav>
 
 <main class="px-6 py-6 max-w-7xl mx-auto">
@@ -82,22 +87,21 @@ function connectWS() {
 
     ws.onmessage = (e) => {
         const event = JSON.parse(e.data);
-        handleLiveEvent(event);
+        window.dispatchEvent(new CustomEvent('sentinel:event', { detail: event }));
     };
 }
 
-function handleLiveEvent(event) {
-    // Refresh HTMX partials on notable events
+// Listen for sentinel events — pages can add their own listeners too
+window.addEventListener('sentinel:event', (e) => {
+    const event = e.detail;
     const notable = ['dns.blocked', 'arp.anomaly', 'device.new', 'port.scan_result'];
     if (notable.includes(event.type)) {
         htmx.trigger(document.body, 'sentinel:refresh');
     }
-
-    // Show toast for critical/warning
     if (event.severity === 'critical' || event.severity === 'warning') {
         showToast(event);
     }
-}
+});
 
 function showToast(event) {
     const container = document.getElementById('toast-container') || createToastContainer();
