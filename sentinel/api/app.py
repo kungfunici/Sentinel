@@ -1,21 +1,3 @@
-"""
-sentinel/api/app.py
-
-FastAPI application — REST endpoints + WebSocket live feed.
-
-Endpoints:
-    GET  /                    → Dashboard
-    GET  /devices             → Devices page
-    GET  /events              → Events page
-    GET  /dns                 → DNS page
-    GET  /api/stats           → JSON stats
-    GET  /api/devices         → JSON devices
-    GET  /api/events          → JSON events
-    GET  /api/dns             → JSON DNS queries
-    POST /api/devices/{ip}/flag  → Flag/unflag a device
-    WS   /ws/events           → Live event stream
-"""
-
 import asyncio
 import json
 import time
@@ -42,7 +24,6 @@ def _datetimeformat(timestamp: float) -> str:
 
 templates.env.filters["datetimeformat"] = _datetimeformat
 
-# Shared state injected by main.py at startup
 _db:  Optional[Database] = None
 _bus: Optional[EventBus] = None
 
@@ -55,10 +36,6 @@ def init(db: Database, bus: EventBus) -> None:
 
 app = FastAPI(title="Sentinel", version="0.1.0")
 
-
-# ------------------------------------------------------------------ #
-#  WebSocket manager                                                   #
-# ------------------------------------------------------------------ #
 
 class ConnectionManager:
     def __init__(self):
@@ -91,19 +68,13 @@ class ConnectionManager:
 manager = ConnectionManager()
 
 
-# ------------------------------------------------------------------ #
-#  Background task: bus → WebSocket broadcast                         #
-# ------------------------------------------------------------------ #
-
 async def event_broadcaster() -> None:
-    """Subscribes to EventBus and broadcasts events to all WS clients."""
     if not _bus:
         return
     async with _bus.subscribe(min_severity="info") as sub:
         async for event in sub:
             if manager.count == 0:
                 continue
-            # Skip raw packet spam — only notable events
             if event.type == EventType.PACKET_CAPTURED and event.severity == "info":
                 continue
             await manager.broadcast({
@@ -114,10 +85,6 @@ async def event_broadcaster() -> None:
                 "data":      event.data,
             })
 
-
-# ------------------------------------------------------------------ #
-#  HTML pages                                                          #
-# ------------------------------------------------------------------ #
 
 @app.get("/", response_class=HTMLResponse)
 async def dashboard(request: Request):
@@ -142,10 +109,6 @@ async def dns_page(request: Request, blocked: bool = False):
     rows = await _db.query_dns(blocked_only=blocked, limit=100) if _db else []
     return templates.TemplateResponse(request, "dns.html", {"queries": rows, "blocked": blocked, "title": "DNS"})
 
-
-# ------------------------------------------------------------------ #
-#  REST API                                                            #
-# ------------------------------------------------------------------ #
 
 @app.get("/api/stats")
 async def api_stats():
@@ -178,24 +141,15 @@ async def flag_device(ip: str, flagged: bool = True):
     return {"ip": ip, "flagged": flagged}
 
 
-# ------------------------------------------------------------------ #
-#  WebSocket                                                           #
-# ------------------------------------------------------------------ #
-
 @app.websocket("/ws/events")
 async def websocket_events(ws: WebSocket):
     await manager.connect(ws)
     try:
         while True:
-            # Keep connection alive — client sends ping
             await ws.receive_text()
     except WebSocketDisconnect:
         manager.disconnect(ws)
 
-
-# ------------------------------------------------------------------ #
-#  HTMX partials — for live-refresh without full page reload          #
-# ------------------------------------------------------------------ #
 
 @app.get("/htmx/stats", response_class=HTMLResponse)
 async def htmx_stats(request: Request):

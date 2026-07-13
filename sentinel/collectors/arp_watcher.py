@@ -1,18 +1,3 @@
-"""
-sentinel/collectors/arp_watcher.py
-
-ARP Watcher — detects ARP-based attacks:
-
-    1. ARP Spoofing      — known IP appears with a different MAC
-    2. Gateway Spoofing  — someone claims the router's IP
-    3. Gratuitous ARP    — unsolicited ARP replies (arpspoof, ettercap)
-    4. ARP Flood         — too many ARP packets from one MAC in short time
-
-Learning mode (first LEARN_WINDOW seconds):
-    All IP/MAC pairs are silently learned — no alerts fired.
-    This prevents false positives from routers/APs with multiple MACs.
-"""
-
 import asyncio
 import logging
 import time
@@ -25,10 +10,10 @@ from sentinel.core.event_bus import Event, EventBus, EventType
 
 log = logging.getLogger("sentinel.arp_watcher")
 
-FLOOD_WINDOW    = 10    # seconds
-FLOOD_THRESHOLD = 20    # ARP packets from one MAC in that window
-LEARN_WINDOW    = 30    # seconds of silent learning at startup
-GARP_COOLDOWN   = 30    # seconds between gratuitous ARP alerts per MAC
+FLOOD_WINDOW    = 10
+FLOOD_THRESHOLD = 20
+LEARN_WINDOW    = 30
+GARP_COOLDOWN   = 30
 
 
 class ArpWatcher:
@@ -42,10 +27,9 @@ class ArpWatcher:
         self.bus         = bus
         self.iface       = iface
         self.gateway_ip  = gateway_ip
-        self._learn_until = 0.0   # set on start()
+        self._learn_until = 0.0
         self._learn_window = learn_window
 
-        # ip → set of known MACs (multiple allowed after learning)
         self._table:      dict[str, set[str]]   = {}
         self._seen_pairs: set[tuple[str, str]]  = set()
 
@@ -58,10 +42,6 @@ class ArpWatcher:
 
         self._total_arp     = 0
         self._total_anomaly = 0
-
-    # ------------------------------------------------------------------ #
-    #  Lifecycle                                                           #
-    # ------------------------------------------------------------------ #
 
     async def start(self) -> None:
         self._loop       = asyncio.get_running_loop()
@@ -81,7 +61,6 @@ class ArpWatcher:
         )
         self._sniffer.start()
 
-        # Log when learning mode ends
         asyncio.get_event_loop().call_later(
             self._learn_window,
             lambda: log.info(
@@ -98,10 +77,6 @@ class ArpWatcher:
             "ARP watcher stopped. total_arp=%d anomalies=%d known_hosts=%d",
             self._total_arp, self._total_anomaly, len(self._table),
         )
-
-    # ------------------------------------------------------------------ #
-    #  Packet handler                                                      #
-    # ------------------------------------------------------------------ #
 
     def _on_packet(self, pkt) -> None:
         if not self._running:
@@ -125,28 +100,24 @@ class ArpWatcher:
         sender_ip  = arp.psrc
         sender_mac = arp.hwsrc
         target_ip  = arp.pdst
-        op         = arp.op      # 1=request, 2=reply
+        op         = arp.op
 
         if not sender_ip or sender_ip == "0.0.0.0":
             return []
 
         self._total_arp += 1
 
-        # Auto-detect gateway
         if not self.gateway_ip and sender_ip.endswith(".1"):
             self.gateway_ip = sender_ip
             log.info("Gateway auto-detected: %s (%s)", sender_ip, sender_mac)
 
-        # ---- Learn or check IP→MAC mapping ----
         known_macs = self._table.setdefault(sender_ip, set())
 
         if learning:
-            # Silent learning — just record, no alerts
             known_macs.add(sender_mac)
         else:
             if sender_mac not in known_macs:
                 if known_macs:
-                    # Known IP, new MAC — this is the spoofing signal
                     is_gateway = (sender_ip == self.gateway_ip)
                     label      = "Gateway spoofing" if is_gateway else "ARP spoofing"
                     log.warning(
@@ -173,10 +144,8 @@ class ArpWatcher:
                             ),
                         },
                     ))
-                # Add to known MACs either way (avoid repeat alerts)
                 known_macs.add(sender_mac)
 
-        # ---- New device (always, even during learning) ----
         pair = (sender_ip, sender_mac)
         if pair not in self._seen_pairs:
             self._seen_pairs.add(pair)
@@ -188,7 +157,6 @@ class ArpWatcher:
                 data      = {"ip": sender_ip, "mac": sender_mac},
             ))
 
-        # ---- Gratuitous ARP (op=2, sender_ip == target_ip) ----
         if op == 2 and sender_ip == target_ip and not learning:
             last = self._garp_seen.get(sender_mac, 0)
             if now - last > GARP_COOLDOWN:
@@ -208,7 +176,6 @@ class ArpWatcher:
                     },
                 ))
 
-        # ---- ARP Flood ----
         times = self._arp_times.setdefault(sender_mac, [])
         times.append(now)
         cutoff = now - FLOOD_WINDOW

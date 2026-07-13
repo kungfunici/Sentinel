@@ -1,19 +1,3 @@
-"""
-sentinel/collectors/port_scanner.py
-
-Periodic async TCP port scanner for LAN hosts.
-
-- Scans only RFC1918 (private) IPs — never external hosts
-- Uses asyncio TCP connect (no root required for scanning itself)
-- Tracks open ports per host, alerts on changes
-- Publishes PORT_SCAN_RESULT events
-
-Published events:
-    PORT_SCAN_RESULT (severity=info)     — routine scan result
-    PORT_SCAN_RESULT (severity=warning)  — new open port on known host
-    PORT_SCAN_RESULT (severity=critical) — high-risk port opened (22, 23, 3389, 5900)
-"""
-
 import asyncio
 import ipaddress
 import logging
@@ -24,42 +8,39 @@ from sentinel.core.event_bus import Event, EventBus, EventType
 
 log = logging.getLogger("sentinel.port_scanner")
 
-# Top ports to scan by default
 DEFAULT_PORTS = [
-    21,    # FTP
-    22,    # SSH
-    23,    # Telnet
-    25,    # SMTP
-    53,    # DNS
-    80,    # HTTP
-    110,   # POP3
-    135,   # RPC
-    139,   # NetBIOS
-    143,   # IMAP
-    443,   # HTTPS
-    445,   # SMB
-    3306,  # MySQL
-    3389,  # RDP
-    5900,  # VNC
-    6379,  # Redis
-    8080,  # HTTP alt
-    8443,  # HTTPS alt
-    9200,  # Elasticsearch
-    27017, # MongoDB
+    21,
+    22,
+    23,
+    25,
+    53,
+    80,
+    110,
+    135,
+    139,
+    143,
+    443,
+    445,
+    3306,
+    3389,
+    5900,
+    6379,
+    8080,
+    8443,
+    9200,
+    27017,
 ]
 
-# These ports opening on any host = critical alert
 HIGH_RISK_PORTS = {22, 23, 3389, 5900, 445, 6379, 27017}
 
-# Private IP ranges
 PRIVATE_RANGES = [
     ipaddress.ip_network("10.0.0.0/8"),
     ipaddress.ip_network("172.16.0.0/12"),
     ipaddress.ip_network("192.168.0.0/16"),
 ]
 
-CONNECT_TIMEOUT = 0.5   # seconds per port
-MAX_CONCURRENT  = 50    # simultaneous connections
+CONNECT_TIMEOUT = 0.5
+MAX_CONCURRENT  = 50
 
 
 def is_private(ip: str) -> bool:
@@ -75,7 +56,7 @@ class PortScanner:
         self,
         bus: EventBus,
         ports: Optional[list[int]] = None,
-        interval: int = 300,        # scan every 5 minutes
+        interval: int = 300,
         connect_timeout: float = CONNECT_TIMEOUT,
         max_concurrent: int = MAX_CONCURRENT,
         own_ip: Optional[str] = None,
@@ -86,22 +67,13 @@ class PortScanner:
         self.connect_timeout = connect_timeout
         self._sem            = asyncio.Semaphore(max_concurrent)
 
-        # ip → set of open ports from last scan
         self._known_open: dict[str, set[int]] = {}
-
-        # ip → timestamp of last scan
         self._last_scan: dict[str, float] = {}
-
-        # Targets injected from ARP/sniffer discoveries
         self._targets: set[str] = set()
 
         self.own_ip   = own_ip
         self._running = False
         self._task:   Optional[asyncio.Task] = None
-
-    # ------------------------------------------------------------------ #
-    #  Lifecycle                                                           #
-    # ------------------------------------------------------------------ #
 
     async def start(self) -> None:
         self._running = True
@@ -122,16 +94,10 @@ class PortScanner:
         log.info("Port scanner stopped. Known hosts: %d", len(self._known_open))
 
     def add_target(self, ip: str) -> None:
-        """Called externally (e.g. from NEW_DEVICE events) to add scan targets."""
         if is_private(ip) and ip != self.own_ip:
             self._targets.add(ip)
 
-    # ------------------------------------------------------------------ #
-    #  Scan loop                                                           #
-    # ------------------------------------------------------------------ #
-
     async def _scan_loop(self) -> None:
-        # Wait a bit after start so other collectors can discover hosts first
         await asyncio.sleep(35)
 
         while self._running:
@@ -142,7 +108,6 @@ class PortScanner:
             else:
                 log.debug("Port scanner — no LAN targets yet, waiting...")
 
-            # Sleep in small chunks so we can exit cleanly
             for _ in range(self.interval):
                 if not self._running:
                     return
@@ -166,7 +131,6 @@ class PortScanner:
         await self._process_results(ip, open_ports, now)
 
     async def _check_port(self, ip: str, port: int) -> bool:
-        """Returns True if port is open, False otherwise."""
         async with self._sem:
             try:
                 _, writer = await asyncio.wait_for(
@@ -182,15 +146,10 @@ class PortScanner:
             except Exception:
                 return False
 
-    # ------------------------------------------------------------------ #
-    #  Result processing                                                   #
-    # ------------------------------------------------------------------ #
-
     async def _process_results(self, ip: str, open_ports: set[int], now: float) -> None:
         known = self._known_open.get(ip)
 
         if known is None:
-            # First scan for this host
             self._known_open[ip] = open_ports
             if open_ports:
                 log.info("Port scan %s — first scan, open: %s", ip, sorted(open_ports))
@@ -210,7 +169,6 @@ class PortScanner:
                 ))
             return
 
-        # Diff against previous scan
         new_ports    = open_ports - known
         closed_ports = known - open_ports
 
@@ -259,10 +217,6 @@ class PortScanner:
                     "description":  f"Port(s) closed on {ip}: {sorted(closed_ports)}",
                 },
             ))
-
-    # ------------------------------------------------------------------ #
-    #  Introspection                                                       #
-    # ------------------------------------------------------------------ #
 
     @property
     def stats(self) -> dict:

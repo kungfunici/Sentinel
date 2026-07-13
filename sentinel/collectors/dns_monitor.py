@@ -1,10 +1,3 @@
-"""
-sentinel/collectors/dns_monitor.py
-
-DNS Monitor — active mode: own Scapy sniffer on UDP port 53 (IPv4 + IPv6).
-Checks queries against a blocklist and publishes DNS_QUERY / DNS_BLOCKED events.
-"""
-
 import asyncio
 import logging
 import time
@@ -56,17 +49,12 @@ class DnsMonitor:
         if blocklist_path:
             self._load_blocklist(blocklist_path)
 
-    # ------------------------------------------------------------------ #
-    #  Lifecycle                                                           #
-    # ------------------------------------------------------------------ #
-
     async def start(self) -> None:
         self._loop    = asyncio.get_running_loop()
         self._running = True
         log.info("DNS monitor starting (mode=%s)", self.mode)
 
         if self.mode == "active":
-            # Capture DNS on both IPv4 and IPv6
             self._sniffer = AsyncSniffer(
                 iface=self.iface,
                 filter="udp port 53",
@@ -90,10 +78,6 @@ class DnsMonitor:
             self._total_queries, self._total_blocked,
         )
 
-    # ------------------------------------------------------------------ #
-    #  Packet handler                                                      #
-    # ------------------------------------------------------------------ #
-
     def _on_packet(self, pkt) -> None:
         if not self._running:
             return
@@ -108,7 +92,6 @@ class DnsMonitor:
         if DNS not in pkt:
             return []
 
-        # Accept both IPv4 and IPv6
         try:
             from scapy.layers.inet6 import IPv6
             if IP in pkt:
@@ -123,7 +106,7 @@ class DnsMonitor:
             src_ip = pkt[IP].src
 
         dns = pkt[DNS]
-        if dns.qr != 0:  # requests only
+        if dns.qr != 0:
             return []
 
         now    = time.time()
@@ -162,15 +145,10 @@ class DnsMonitor:
             except Exception as exc:
                 log.debug("DNSQR parse error: %s", exc)
 
-            # Walk DNSQR linked list
             next_node = node.payload
             node = next_node if isinstance(next_node, DNSQR) else None
 
         return events
-
-    # ------------------------------------------------------------------ #
-    #  Passive mode                                                        #
-    # ------------------------------------------------------------------ #
 
     async def _passive_loop(self) -> None:
         async with self.bus.subscribe() as sub:
@@ -182,10 +160,6 @@ class DnsMonitor:
                 d = event.data
                 if d.get("dst_port") == 53 or d.get("src_port") == 53:
                     log.debug("Passive DNS traffic: %s -> %s", d.get("src_ip"), d.get("dst_ip"))
-
-    # ------------------------------------------------------------------ #
-    #  Blocklist                                                           #
-    # ------------------------------------------------------------------ #
 
     def _is_blocked(self, domain: str) -> bool:
         domain = domain.lower().rstrip(".")

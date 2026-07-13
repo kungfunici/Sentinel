@@ -1,20 +1,3 @@
-"""
-sentinel/core/enrichment.py
-
-Async enrichment for discovered devices:
-    - Reverse DNS lookup  (socket.getnameinfo)
-    - MAC vendor lookup   (local IEEE OUI database, auto-downloaded)
-
-Usage:
-    enricher = Enricher(db)
-    await enricher.setup()           # downloads OUI db if missing
-    info = await enricher.enrich("192.168.178.1", "0c:72:74:8e:ab:ad")
-    # -> {"hostname": "fritz.box", "vendor": "AVM GmbH"}
-
-The enricher is also wired into the main event loop — it listens for
-NEW_DEVICE events and auto-enriches them in the background.
-"""
-
 import asyncio
 import csv
 import io
@@ -29,20 +12,14 @@ log = logging.getLogger("sentinel.enrichment")
 OUI_URL      = "https://standards-oui.ieee.org/oui/oui.csv"
 OUI_FALLBACK = "https://raw.githubusercontent.com/wireshark/wireshark/master/manuf"
 OUI_PATH     = Path("oui.csv")
-OUI_MAX_AGE  = 60 * 60 * 24 * 30   # refresh monthly
+OUI_MAX_AGE  = 60 * 60 * 24 * 30
 
-
-# ------------------------------------------------------------------ #
-#  OUI database                                                        #
-# ------------------------------------------------------------------ #
 
 def _parse_oui_csv(text: str) -> dict[str, str]:
-    """Parse IEEE OUI CSV → {prefix_upper: vendor_name}"""
     result: dict[str, str] = {}
     reader = csv.DictReader(io.StringIO(text))
     for row in reader:
         try:
-            # CSV columns: Registry,Assignment,Organization Name,Organization Address
             prefix = row.get("Assignment", "").upper().strip()
             vendor = row.get("Organization Name", "").strip()
             if prefix and vendor:
@@ -53,10 +30,6 @@ def _parse_oui_csv(text: str) -> dict[str, str]:
 
 
 def _parse_wireshark_manuf(text: str) -> dict[str, str]:
-    """
-    Fallback: parse Wireshark manuf file format:
-        00:00:00\tXerox\t# Xerox Corporation
-    """
     result: dict[str, str] = {}
     for line in text.splitlines():
         line = line.strip()
@@ -73,7 +46,6 @@ def _parse_wireshark_manuf(text: str) -> dict[str, str]:
 
 
 async def _download_oui() -> dict[str, str]:
-    """Download OUI database. Tries IEEE CSV first, falls back to Wireshark manuf."""
     import urllib.request
 
     log.info("Downloading OUI database from IEEE...")
@@ -96,7 +68,6 @@ async def _download_oui() -> dict[str, str]:
     except Exception as exc:
         log.warning("IEEE OUI download failed: %s — trying Wireshark fallback", exc)
 
-    # Wireshark fallback
     try:
         req2 = urllib.request.Request(
             OUI_FALLBACK,
@@ -124,7 +95,6 @@ def _load_oui_from_disk() -> dict[str, str]:
         return {}
     try:
         text = OUI_PATH.read_text(encoding="utf-8")
-        # Detect format
         if "Assignment" in text[:200]:
             db = _parse_oui_csv(text)
         else:
@@ -136,29 +106,17 @@ def _load_oui_from_disk() -> dict[str, str]:
         return {}
 
 
-# ------------------------------------------------------------------ #
-#  Enricher                                                            #
-# ------------------------------------------------------------------ #
-
 class Enricher:
-    """
-    Enriches IP/MAC pairs with hostname and vendor info.
-    Results are cached in memory to avoid repeat lookups.
-    """
-
     def __init__(self, db=None, dns_timeout: float = 2.0):
-        self._db          = db          # sentinel Database instance (optional)
+        self._db          = db
         self._oui:  dict[str, str] = {}
-        self._cache: dict[str, dict] = {}   # ip -> {hostname, vendor}
+        self._cache: dict[str, dict] = {}
         self._dns_timeout = dns_timeout
-        self._dns_sem     = asyncio.Semaphore(10)   # max 10 concurrent DNS lookups
+        self._dns_sem     = asyncio.Semaphore(10)
 
     async def setup(self) -> None:
-        """Load or download OUI database."""
-        # Try disk first
         self._oui = _load_oui_from_disk()
 
-        # Download if missing or stale
         needs_download = not self._oui
         if OUI_PATH.exists():
             age = time.time() - OUI_PATH.stat().st_mtime
@@ -170,7 +128,6 @@ class Enricher:
             self._oui = await _download_oui()
 
     def vendor_for_mac(self, mac: Optional[str]) -> Optional[str]:
-        """Look up vendor for a MAC address string like 'aa:bb:cc:dd:ee:ff'."""
         if not mac:
             return None
         try:
@@ -180,7 +137,6 @@ class Enricher:
             return None
 
     async def reverse_dns(self, ip: str) -> Optional[str]:
-        """Non-blocking reverse DNS lookup with timeout."""
         if ip in self._cache and "hostname" in self._cache[ip]:
             return self._cache[ip]["hostname"]
 
@@ -194,7 +150,6 @@ class Enricher:
                     ),
                     timeout=self._dns_timeout,
                 )
-                # Don't store if result is just the IP back
                 hostname = result if result != ip else None
                 self._cache.setdefault(ip, {})["hostname"] = hostname
                 return hostname
@@ -203,10 +158,6 @@ class Enricher:
                 return None
 
     async def enrich(self, ip: str, mac: Optional[str] = None) -> dict:
-        """
-        Full enrichment for an IP+MAC pair.
-        Returns dict with hostname and vendor (both can be None).
-        """
         if ip in self._cache:
             cached = self._cache[ip]
             if "hostname" in cached and "vendor" in cached:
@@ -218,7 +169,6 @@ class Enricher:
         result = {"hostname": hostname, "vendor": vendor}
         self._cache[ip] = result
 
-        # Persist to DB if available
         if self._db and (hostname or vendor):
             try:
                 await self._db._conn.execute(
@@ -237,10 +187,6 @@ class Enricher:
         return result
 
     async def enrich_all_devices(self, db) -> int:
-        """
-        Enrich all devices in DB that are missing hostname or vendor.
-        Returns count of devices updated.
-        """
         devices = await db.query_devices()
         tasks   = []
         count   = 0

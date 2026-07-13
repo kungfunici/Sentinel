@@ -1,17 +1,3 @@
-"""
-sentinel/collectors/sniffer.py
-
-Passive packet capture using Scapy.
-Runs in a background thread (Scapy's sniff() is blocking).
-Publishes PACKET_CAPTURED events onto the EventBus.
-
-Detected and published:
-    - Every IP packet (src/dst/proto/size)
-    - TCP SYN floods (heuristic)
-    - Large payload anomalies
-    - New src IPs → NEW_DEVICE event
-"""
-
 import asyncio
 import threading
 import time
@@ -26,21 +12,12 @@ from sentinel.core.event_bus import Event, EventBus, EventType
 
 log = logging.getLogger("sentinel.sniffer")
 
-
-# Heuristic thresholds
-SYN_FLOOD_WINDOW    = 10       # seconds
-SYN_FLOOD_THRESHOLD = 50       # SYNs from one IP in that window
-LARGE_PACKET_BYTES  = 8192     # flag packets larger than this
+SYN_FLOOD_WINDOW    = 10
+SYN_FLOOD_THRESHOLD = 50
+LARGE_PACKET_BYTES  = 8192
 
 
 class PacketSniffer:
-    """
-    Wraps Scapy's AsyncSniffer.
-
-    Runs the capture in a background thread and dispatches
-    parsed events to the asyncio EventBus.
-    """
-
     def __init__(
         self,
         bus: EventBus,
@@ -50,23 +27,16 @@ class PacketSniffer:
         own_ip: Optional[str] = None,
     ):
         self.bus    = bus
-        self.iface  = iface        # None = Scapy picks the default
+        self.iface  = iface
         self.filter = bpf_filter
         self.loop   = loop
 
         self._sniffer: Optional[AsyncSniffer] = None
         self._running = False
 
-        # Track seen IPs for NEW_DEVICE detection
         self.own_ip = own_ip
         self._seen_ips: set[str] = set()
-
-        # SYN flood tracking: {src_ip: [timestamps]}
         self._syn_times: dict[str, list[float]] = {}
-
-    # ------------------------------------------------------------------ #
-    #  Lifecycle                                                           #
-    # ------------------------------------------------------------------ #
 
     async def start(self) -> None:
         self.loop = self.loop or asyncio.get_running_loop()
@@ -88,15 +58,7 @@ class PacketSniffer:
             self._sniffer.stop()
             log.info("Sniffer stopped")
 
-    # ------------------------------------------------------------------ #
-    #  Packet handler (called from Scapy's capture thread)                #
-    # ------------------------------------------------------------------ #
-
     def _on_packet(self, pkt) -> None:
-        """
-        Called by Scapy in its own thread.
-        We schedule a coroutine on the asyncio event loop — safe cross-thread.
-        """
         if not self._running:
             return
         try:
@@ -107,12 +69,9 @@ class PacketSniffer:
             log.debug("Packet parse error: %s", exc)
 
     def _parse(self, pkt) -> Optional[Event]:
-        """Turn a Scapy packet into an Event. Returns None to drop silently."""
-
-        # ---- ARP (hand off to ARP watcher, just track devices here) ----
         if ARP in pkt:
             self._maybe_new_device(pkt[ARP].psrc, mac=pkt[ARP].hwsrc)
-            return None   # ARP watcher handles the detail
+            return None
 
         if IP not in pkt:
             return None
@@ -125,7 +84,6 @@ class PacketSniffer:
 
         self._maybe_new_device(src)
 
-        # Base packet data
         data: dict = {
             "src_ip":   src,
             "dst_ip":   dst,
@@ -134,29 +92,24 @@ class PacketSniffer:
         }
         severity = "info"
 
-        # TCP layer
         if TCP in pkt:
             tcp = pkt[TCP]
             data["src_port"] = tcp.sport
             data["dst_port"] = tcp.dport
             data["flags"]    = str(tcp.flags)
 
-            # SYN flood heuristic — skip own IP (port scanner causes false positives)
             if "S" in str(tcp.flags) and "A" not in str(tcp.flags):
                 if src != self.own_ip:
                     severity = self._check_syn_flood(src, now)
 
-        # UDP layer
         elif UDP in pkt:
             udp = pkt[UDP]
             data["src_port"] = udp.sport
             data["dst_port"] = udp.dport
 
-        # ICMP
         elif ICMP in pkt:
             data["icmp_type"] = pkt[ICMP].type
 
-        # Large packet anomaly (override if already critical)
         if size > LARGE_PACKET_BYTES and severity != "critical":
             severity = "warning"
             data["anomaly"] = f"large_packet:{size}b"
@@ -168,10 +121,6 @@ class PacketSniffer:
             source    = "sniffer",
             timestamp = now,
         )
-
-    # ------------------------------------------------------------------ #
-    #  Helpers                                                             #
-    # ------------------------------------------------------------------ #
 
     def _maybe_new_device(self, ip: str, mac: Optional[str] = None) -> None:
         if not ip or ip in self._seen_ips or ip.startswith("0.") or ip == "255.255.255.255":
@@ -190,7 +139,6 @@ class PacketSniffer:
     def _check_syn_flood(self, src: str, now: float) -> str:
         times = self._syn_times.setdefault(src, [])
         times.append(now)
-        # Prune old entries
         cutoff = now - SYN_FLOOD_WINDOW
         self._syn_times[src] = [t for t in times if t > cutoff]
         count = len(self._syn_times[src])

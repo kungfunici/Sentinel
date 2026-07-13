@@ -1,16 +1,3 @@
-"""
-sentinel/core/event_bus.py
-
-Central async event bus. Every collector puts Events here.
-Every consumer (DB writer, CLI, Jarvis, future WebSocket) gets from here.
-
-Usage:
-    bus = EventBus()
-    await bus.publish(Event(...))
-    async for event in bus.subscribe():
-        ...
-"""
-
 import asyncio
 import time
 from dataclasses import dataclass, field
@@ -19,20 +6,19 @@ from typing import AsyncIterator
 
 
 class EventType(str, Enum):
-    # Passive collectors
     PACKET_CAPTURED  = "packet.captured"
     DNS_QUERY        = "dns.query"
     DNS_BLOCKED      = "dns.blocked"
-
-    # Active collectors (stubs for Phase 2)
     PORT_SCAN_RESULT = "port.scan_result"
     ARP_ANOMALY      = "arp.anomaly"
     NEW_DEVICE       = "device.new"
-
-    # System
     SENTINEL_START   = "sentinel.start"
     SENTINEL_STOP    = "sentinel.stop"
     ERROR            = "system.error"
+    DHCP_ANOMALY     = "dhcp.anomaly"
+    HTTP_REQUEST     = "http.request"
+    ICMP_ANOMALY     = "icmp.anomaly"
+    BANDWIDTH_REPORT = "bandwidth.report"
 
 
 SEVERITY_ORDER = {"info": 0, "warning": 1, "critical": 2}
@@ -42,8 +28,8 @@ SEVERITY_ORDER = {"info": 0, "warning": 1, "critical": 2}
 class Event:
     type: EventType
     data: dict
-    severity: str = "info"          # "info" | "warning" | "critical"
-    source: str   = "unknown"       # which collector produced this
+    severity: str = "info"
+    source: str   = "unknown"
     timestamp: float = field(default_factory=time.time)
 
     def __post_init__(self):
@@ -61,14 +47,6 @@ class Event:
 
 
 class EventBus:
-    """
-    Fan-out async event bus.
-
-    - Multiple collectors can publish concurrently.
-    - Multiple consumers each get their own queue via subscribe().
-    - max_queue_size guards against a slow consumer blocking everything.
-    """
-
     def __init__(self, max_queue_size: int = 2000):
         self._subscribers: list[asyncio.Queue] = []
         self._max_size = max_queue_size
@@ -98,15 +76,6 @@ class EventBus:
 
 
 class Subscription:
-    """
-    Returned by EventBus.subscribe(). Use as an async context manager
-    or call .events() directly.
-
-        async with bus.subscribe() as sub:
-            async for event in sub:
-                handle(event)
-    """
-
     def __init__(
         self,
         queue: asyncio.Queue,

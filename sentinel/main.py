@@ -1,15 +1,3 @@
-"""
-sentinel/main.py
-
-Entry point. Wires up:
-    EventBus → DB writer
-    PacketSniffer → EventBus
-    DnsMonitor → EventBus
-    ArpWatcher → EventBus
-    Enricher → auto-enriches NEW_DEVICE events in background
-    CLI display loop
-"""
-
 import asyncio
 import argparse
 import logging
@@ -34,6 +22,10 @@ from sentinel.collectors.sniffer import PacketSniffer
 from sentinel.collectors.dns_monitor import DnsMonitor
 from sentinel.collectors.arp_watcher import ArpWatcher
 from sentinel.collectors.port_scanner import PortScanner
+from sentinel.collectors.dhcp_monitor import DhcpMonitor
+from sentinel.collectors.http_monitor import HttpMonitor
+from sentinel.collectors.icmp_monitor import IcmpMonitor
+from sentinel.collectors.bandwidth_tracker import BandwidthTracker
 from sentinel.api.app import app as fastapi_app, init as api_init, event_broadcaster
 
 console = Console()
@@ -54,7 +46,6 @@ def setup_logging(verbose: bool = False) -> None:
 log = logging.getLogger("sentinel")
 
 
-# Improved db_writer with retry logic
 async def db_writer(bus: EventBus, db: Database) -> None:
     async with bus.subscribe(min_severity="info") as sub:
         async for event in sub:
@@ -62,10 +53,9 @@ async def db_writer(bus: EventBus, db: Database) -> None:
                 await db.write_event(event)
             except Exception as exc:
                 log.error("DB write failed: %s", exc)
-                # Retry logic
                 for attempt in range(3):
                     try:
-                        await asyncio.sleep(1 << attempt)  # Exponential backoff
+                        await asyncio.sleep(1 << attempt)
                         await db.write_event(event)
                         break
                     except Exception as retry_exc:
@@ -73,7 +63,6 @@ async def db_writer(bus: EventBus, db: Database) -> None:
                 else:
                     log.critical("Failed to write event after retries")
 
-# Improved enrichment_loop with exception handling
 async def enrichment_loop(bus: EventBus, db: Database, enricher: Enricher) -> None:
     await asyncio.sleep(3)
     try:
@@ -102,10 +91,6 @@ async def enrichment_loop(bus: EventBus, db: Database, enricher: Enricher) -> No
                 log.error(f"Failed to enrich {ip}: {exc}")
 
 
-# ------------------------------------------------------------------ #
-#  Live CLI display                                                    #
-# ------------------------------------------------------------------ #
-
 SEVERITY_STYLE = {"info": "dim", "warning": "yellow", "critical": "bold red"}
 EVENT_ICON = {
     EventType.PACKET_CAPTURED:  "PKT",
@@ -115,6 +100,10 @@ EVENT_ICON = {
     EventType.ARP_ANOMALY:      "ARP",
     EventType.PORT_SCAN_RESULT: "SCN",
     EventType.ERROR:            "ERR",
+    EventType.DHCP_ANOMALY:     "DHP",
+    EventType.HTTP_REQUEST:     "HTTP",
+    EventType.ICMP_ANOMALY:     "ICM",
+    EventType.BANDWIDTH_REPORT: "BND",
 }
 
 
@@ -170,6 +159,14 @@ def _format_detail(ev: Event) -> str:
         return f"New host: {d.get('ip','?')}{mac}"
     if ev.type == EventType.ARP_ANOMALY:
         return d.get("description", str(d)[:120])
+    if ev.type == EventType.DHCP_ANOMALY:
+        return d.get("description", str(d)[:120])
+    if ev.type == EventType.HTTP_REQUEST:
+        return d.get("description", str(d)[:120])
+    if ev.type == EventType.ICMP_ANOMALY:
+        return d.get("description", str(d)[:120])
+    if ev.type == EventType.BANDWIDTH_REPORT:
+        return d.get("description", str(d)[:120])
     return str(d)[:120]
 
 
@@ -186,12 +183,7 @@ async def display_loop(bus: EventBus, display: LiveDisplay) -> None:
                 live.update(display.build_table())
 
 
-# ------------------------------------------------------------------ #
-#  Main                                                                #
-# ------------------------------------------------------------------ #
-
 async def _run_uvicorn(host: str, port: int) -> None:
-    """Run uvicorn in a way that shuts down cleanly with asyncio cancellation."""
     config = uvicorn.Config(fastapi_app, host=host, port=port, log_level="warning")
     server = uvicorn.Server(config)
     try:
@@ -201,7 +193,6 @@ async def _run_uvicorn(host: str, port: int) -> None:
 
 
 async def _target_feeder(bus: EventBus, scanner: PortScanner) -> None:
-    """Feeds NEW_DEVICE events into the port scanner as targets."""
     async with bus.subscribe(min_severity="info") as sub:
         async for event in sub:
             if event.type == EventType.NEW_DEVICE:
@@ -215,7 +206,6 @@ async def run(args: argparse.Namespace, stop_event: asyncio.Event) -> None:
     display  = LiveDisplay()
     enricher = Enricher()
 
-    # Detect own IP — UDP trick, no data sent
     own_ip = None
     gateway_ip = args.gateway
     try:
@@ -230,7 +220,6 @@ async def run(args: argparse.Namespace, stop_event: asyncio.Event) -> None:
         except Exception:
             log.warning("Could not detect own IP — SYN flood self-alerts may occur")
 
-    # Auto-detect default gateway if not provided
     if not gateway_ip:
         try:
             import subprocess, re
@@ -255,7 +244,6 @@ async def run(args: argparse.Namespace, stop_event: asyncio.Event) -> None:
             severity="info", source="main",
         ))
 
-        # Init API with shared db + bus
         api_init(db, bus)
 
         console.print("[dim]Loading OUI database...[/]")
@@ -268,6 +256,10 @@ async def run(args: argparse.Namespace, stop_event: asyncio.Event) -> None:
         )
         arp     = ArpWatcher(bus, iface=args.iface, gateway_ip=gateway_ip)
         scanner = PortScanner(bus, interval=args.scan_interval, own_ip=own_ip)
+        dhcp    = DhcpMonitor(bus, iface=args.iface)
+        http    = HttpMonitor(bus, iface=args.iface)
+        icmp    = IcmpMonitor(bus, iface=args.iface)
+        bw      = BandwidthTracker(bus)
 
         tasks = [
             asyncio.create_task(db_writer(bus, db),               name="db-writer"),
@@ -285,6 +277,10 @@ async def run(args: argparse.Namespace, stop_event: asyncio.Event) -> None:
         await dns.start()
         await arp.start()
         await scanner.start()
+        await dhcp.start()
+        await http.start()
+        await icmp.start()
+        await bw.start()
 
         if sys.platform != "win32":
             loop = asyncio.get_running_loop()
@@ -303,6 +299,10 @@ async def run(args: argparse.Namespace, stop_event: asyncio.Event) -> None:
         await dns.stop()
         await arp.stop()
         await scanner.stop()
+        await dhcp.stop()
+        await http.stop()
+        await icmp.stop()
+        await bw.stop()
 
         for t in tasks:
             t.cancel()

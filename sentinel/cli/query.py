@@ -1,20 +1,3 @@
-"""
-sentinel/cli/query.py
-
-CLI query tool for Sentinel's SQLite database.
-
-Usage:
-    sentinel-query --events
-    sentinel-query --events --severity warning
-    sentinel-query --events --type dns.blocked
-    sentinel-query --dns
-    sentinel-query --dns --blocked
-    sentinel-query --devices
-    sentinel-query --devices --flagged
-    sentinel-query --stats
-    sentinel-query --tail          (live follow, like tail -f)
-"""
-
 import argparse
 import asyncio
 import json
@@ -38,10 +21,6 @@ SEVERITY_STYLE = {
 }
 
 
-# ------------------------------------------------------------------ #
-#  Formatters                                                          #
-# ------------------------------------------------------------------ #
-
 def fmt_time(ts: float) -> str:
     return time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(ts))
 
@@ -49,7 +28,6 @@ def fmt_time(ts: float) -> str:
 def fmt_data(raw: str) -> str:
     try:
         d = json.loads(raw)
-        # Compact single-line summary
         if "src_ip" in d and "dst_ip" in d:
             port  = f":{d['dst_port']}" if d.get("dst_port") else ""
             flags = f" [{d['flags']}]" if d.get("flags") else ""
@@ -63,10 +41,6 @@ def fmt_data(raw: str) -> str:
     except Exception:
         return raw[:100]
 
-
-# ------------------------------------------------------------------ #
-#  Tables                                                              #
-# ------------------------------------------------------------------ #
 
 def events_table(rows: list[dict], title: str = "Events") -> Table:
     t = Table(title=title, box=box.MINIMAL_DOUBLE_HEAD, expand=True, header_style="bold")
@@ -155,15 +129,11 @@ def stats_table(stats: dict) -> Table:
     return t
 
 
-# ------------------------------------------------------------------ #
-#  Tail mode                                                           #
-# ------------------------------------------------------------------ #
-
 async def tail_mode(db: Database, severity: str, interval: float = 1.5) -> None:
     """Poll DB every interval seconds and show new events live."""
     console.print("[dim]Tail mode — Ctrl+C to stop[/]")
     seen_ids: set[int] = set()
-    since = time.time() - 60   # start from last 60s
+    since = time.time() - 60
 
     try:
         while True:
@@ -184,10 +154,6 @@ async def tail_mode(db: Database, severity: str, interval: float = 1.5) -> None:
     except KeyboardInterrupt:
         pass
 
-
-# ------------------------------------------------------------------ #
-#  Main                                                                #
-# ------------------------------------------------------------------ #
 
 async def run(args: argparse.Namespace) -> None:
     db_path = Path(args.db)
@@ -228,7 +194,6 @@ async def run(args: argparse.Namespace) -> None:
             console.print(devices_table(rows, title=f"{title} ({len(rows)})"))
             return
 
-        # Default: events
         rows = await db.query_events(
             severity=args.severity,
             event_type=args.type,
@@ -268,7 +233,6 @@ examples:
     parser.add_argument("--db",       default="sentinel.db", help="Path to sentinel.db")
     parser.add_argument("--limit",    type=int, default=50,  help="Max rows to return (default: 50)")
 
-    # What to query
     mode = parser.add_mutually_exclusive_group()
     mode.add_argument("--events",  action="store_true", help="Query events table (default)")
     mode.add_argument("--dns",     action="store_true", help="Query DNS queries table")
@@ -276,7 +240,6 @@ examples:
     mode.add_argument("--stats",   action="store_true", help="Show DB statistics")
     mode.add_argument("--tail",    action="store_true", help="Live follow new events (like tail -f)")
 
-    # Filters
     parser.add_argument("--severity", choices=["info", "warning", "critical"], help="Filter by severity")
     parser.add_argument("--type",     help="Filter by event type (e.g. dns.blocked, packet.captured)")
     parser.add_argument("--blocked",  action="store_true", help="DNS: show blocked only")
@@ -288,29 +251,3 @@ examples:
 
 if __name__ == "__main__":
     main()
-
-
-# ------------------------------------------------------------------ #
-#  Enrich command (append to existing main)                           #
-# ------------------------------------------------------------------ #
-
-async def run_enrich(args: argparse.Namespace) -> None:
-    """Standalone enrichment run — enrich all devices in DB."""
-    db_path = Path(args.db)
-    if not db_path.exists():
-        console.print(f"[red]Database not found:[/] {db_path}")
-        return
-
-    from sentinel.core.enrichment import Enricher
-
-    async with Database(db_path) as db:
-        enricher = Enricher(db)
-        console.print("[dim]Setting up enricher (may download OUI database ~6MB)...[/]")
-        await enricher.setup()
-        console.print("[dim]Enriching all devices...[/]")
-        count = await enricher.enrich_all_devices(db)
-        console.print(f"[green]Done.[/] Updated {count} devices.")
-
-        # Show result
-        rows = await db.query_devices()
-        console.print(devices_table(rows, title=f"Devices after enrichment ({len(rows)})"))
