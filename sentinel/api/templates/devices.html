@@ -34,8 +34,8 @@
                 <td class="px-4 py-3 text-gray-300 text-xs max-w-xs truncate">{{ d.hostname or '—' }}</td>
                 <td class="px-4 py-3 text-gray-400 text-xs">{{ d.vendor or '—' }}</td>
                 <td class="px-4 py-3 font-mono text-xs text-gray-500">{{ d.mac or '—' }}</td>
-                <td class="px-4 py-3 text-xs text-gray-500">{{ d.first_seen | int }}</td>
-                <td class="px-4 py-3 text-xs text-gray-500">{{ d.last_seen | int }}</td>
+                <td class="px-4 py-3 text-xs text-gray-500">{{ d.first_seen | datetimeformat }}</td>
+                <td class="px-4 py-3 text-xs text-gray-500">{{ d.last_seen | datetimeformat }}</td>
                 <td class="px-4 py-3">
                     <button
                         hx-post="/api/devices/{{ d.ip }}/flag?flagged={{ 'false' if d.flagged else 'true' }}"

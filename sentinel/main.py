@@ -54,10 +54,7 @@ def setup_logging(verbose: bool = False) -> None:
 log = logging.getLogger("sentinel")
 
 
-# ------------------------------------------------------------------ #
-#  DB writer                                                           #
-# ------------------------------------------------------------------ #
-
+# Improved db_writer with retry logic
 async def db_writer(bus: EventBus, db: Database) -> None:
     async with bus.subscribe(min_severity="info") as sub:
         async for event in sub:
@@ -65,32 +62,44 @@ async def db_writer(bus: EventBus, db: Database) -> None:
                 await db.write_event(event)
             except Exception as exc:
                 log.error("DB write failed: %s", exc)
+                # Retry logic
+                for attempt in range(3):
+                    try:
+                        await asyncio.sleep(1 << attempt)  # Exponential backoff
+                        await db.write_event(event)
+                        break
+                    except Exception as retry_exc:
+                        log.warning(f"Retry {attempt + 1} failed: {retry_exc}")
+                else:
+                    log.critical("Failed to write event after retries")
 
-
-# ------------------------------------------------------------------ #
-#  Enrichment background task                                          #
-# ------------------------------------------------------------------ #
-
+# Improved enrichment_loop with exception handling
 async def enrichment_loop(bus: EventBus, db: Database, enricher: Enricher) -> None:
     await asyncio.sleep(3)
-    await enricher.enrich_all_devices(db)
+    try:
+        await enricher.enrich_all_devices(db)
+    except Exception as exc:
+        log.error("Enrichment failed: %s", exc)
 
     async with bus.subscribe(min_severity="info") as sub:
         async for event in sub:
             if event.type != EventType.NEW_DEVICE:
                 continue
-            ip  = event.data.get("ip", "")
+            ip = event.data.get("ip", "")
             mac = event.data.get("mac")
             if not ip:
                 continue
-            result = await enricher.enrich(ip, mac)
-            if result.get("hostname") or result.get("vendor"):
-                log.info(
-                    "Enriched %s → %s (%s)",
-                    ip,
-                    result.get("hostname") or "?",
-                    result.get("vendor") or "unknown vendor",
-                )
+            try:
+                result = await enricher.enrich(ip, mac)
+                if result.get("hostname") or result.get("vendor"):
+                    log.info(
+                        "Enriched %s → %s (%s)",
+                        ip,
+                        result.get("hostname") or "?",
+                        result.get("vendor") or "unknown vendor",
+                    )
+            except Exception as exc:
+                log.error(f"Failed to enrich {ip}: {exc}")
 
 
 # ------------------------------------------------------------------ #

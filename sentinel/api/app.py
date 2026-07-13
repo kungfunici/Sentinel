@@ -35,6 +35,13 @@ log = logging.getLogger("sentinel.api")
 TEMPLATES_DIR = Path(__file__).parent / "templates"
 templates     = Jinja2Templates(directory=str(TEMPLATES_DIR))
 
+
+def _datetimeformat(timestamp: float) -> str:
+    return time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(timestamp))
+
+
+templates.env.filters["datetimeformat"] = _datetimeformat
+
 # Shared state injected by main.py at startup
 _db:  Optional[Database] = None
 _bus: Optional[EventBus] = None
