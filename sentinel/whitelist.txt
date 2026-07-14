@@ -1,0 +1,5 @@
+*.windowsupdate.com
+*.microsoft.com
+*.office.com
+*.office.net
+*.google.com

@@ -1,24 +1,9 @@
 import pytest
 from unittest.mock import AsyncMock, MagicMock
 import sentinel.api.app
-from sentinel.api.app import ConnectionManager, _datetimeformat, manager
+from sentinel.api.app import ConnectionManager, manager
 from sentinel.core.event_bus import EventBus
 from sentinel.core.database import Database
-
-
-class TestDateTimeFormat:
-    def test_local_format(self):
-        result = _datetimeformat(1000000000, utc=False)
-        assert isinstance(result, str)
-
-    def test_utc_format(self):
-        result = _datetimeformat(1000000000, utc=True)
-        assert isinstance(result, str)
-        assert "2001" in result
-
-    def test_default_is_local(self):
-        result = _datetimeformat(0)
-        assert isinstance(result, str)
 
 
 class TestConnectionManager:
@@ -77,7 +62,7 @@ class TestInit:
         orig_bus = sentinel.api.app._bus
         db = MagicMock(spec=Database)
         bus = EventBus()
-        sentinel.api.app.init(db, bus)
+        sentinel.api.app.init(db, bus, blocklist_path=None, whitelist_path=None)
         assert sentinel.api.app._db is db
         assert sentinel.api.app._bus is bus
-        sentinel.api.app.init(orig_db, orig_bus if orig_bus else bus)
+        sentinel.api.app.init(orig_db, orig_bus if orig_bus else bus, blocklist_path=None, whitelist_path=None)

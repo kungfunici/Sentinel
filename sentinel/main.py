@@ -33,6 +33,8 @@ from sentinel.collectors.bandwidth_tracker import BandwidthTracker
 from sentinel.api.app import app as fastapi_app, init as api_init, event_broadcaster
 from sentinel.cli.shell import SentinelShell
 from sentinel.core.threat_feeds import update_blocklist, DEFAULT_FEEDS
+
+_SENTINEL_DIR = Path(__file__).parent
 from sentinel.core.rules_engine import RulesEngine, rule_from_dict
 
 console = Console()
@@ -297,7 +299,11 @@ async def run(args: argparse.Namespace, stop_event: asyncio.Event) -> None:
             severity="info", source="main",
         ))
 
-        api_init(db, bus)
+        api_init(
+            db, bus,
+            blocklist_path=Path(args.blocklist),
+            whitelist_path=Path(args.whitelist),
+        )
 
         console.print("[dim]Loading OUI database...[/]")
         await enricher.setup()
@@ -305,12 +311,12 @@ async def run(args: argparse.Namespace, stop_event: asyncio.Event) -> None:
         sniffer = PacketSniffer(bus, iface=args.iface, own_ip=own_ip)
         dns     = DnsMonitor(
             bus, iface=args.iface, mode="active",
-            blocklist_path=Path(args.blocklist) if args.blocklist else None,
+            blocklist_path=Path(args.blocklist),
         )
         arp     = ArpWatcher(bus, iface=args.iface, gateway_ip=gateway_ip)
         scanner = PortScanner(bus, interval=args.scan_interval, own_ip=own_ip)
         dhcp    = DhcpMonitor(bus, iface=args.iface)
-        http    = HttpMonitor(bus, iface=args.iface)
+        http    = HttpMonitor(bus, iface=args.iface, whitelist_path=Path(args.whitelist))
         icmp    = IcmpMonitor(bus, iface=args.iface)
         tls     = TlsMonitor(bus, iface=args.iface)
         bw      = BandwidthTracker(bus)
@@ -351,9 +357,9 @@ async def run(args: argparse.Namespace, stop_event: asyncio.Event) -> None:
         if rules_engine:
             tasks.insert(0, asyncio.create_task(rules_engine.start(), name="rules-engine"))
 
-        if args.threat_feeds and args.blocklist:
+        if args.threat_feeds:
             tasks.insert(0, asyncio.create_task(
-                feeds_update_loop(Path(args.blocklist) if args.blocklist else None, DEFAULT_FEEDS),
+                feeds_update_loop(Path(args.blocklist), DEFAULT_FEEDS),
                 name="threat-feeds",
             ))
 
@@ -414,7 +420,8 @@ async def run(args: argparse.Namespace, stop_event: asyncio.Event) -> None:
 
 def _apply_config_defaults(parser: argparse.ArgumentParser, config: dict) -> None:
     mapping = {
-        "iface": "iface", "db": "db", "blocklist": "blocklist",
+        "iface": "iface", "db": "db",         "blocklist": "blocklist",
+        "whitelist": "whitelist",
         "gateway": "gateway", "host": "host", "port": "port",
         "scan_interval": "scan_interval", "oui_path": "oui_path",
         "verbose": "verbose", "daemon": "daemon",
@@ -440,7 +447,8 @@ def main() -> None:
     parser = argparse.ArgumentParser(description="Sentinel — local network security monitor")
     parser.add_argument("--iface",       default=None,             help="Network interface (default: auto)")
     parser.add_argument("--db",          default="sentinel.db",    help="SQLite database path")
-    parser.add_argument("--blocklist",   default=None,             help="Path to DNS blocklist file")
+    parser.add_argument("--blocklist",   default=str(_SENTINEL_DIR / "blocklist.txt"),  help="Path to DNS blocklist file")
+    parser.add_argument("--whitelist",   default=str(_SENTINEL_DIR / "whitelist.txt"),  help="Path to HTTP whitelist patterns file")
     parser.add_argument("--gateway",     default=None,             help="Gateway IP for spoofing detection (default: auto)")
     parser.add_argument("--host",        default="0.0.0.0",        help="API host (default: 0.0.0.0)")
     parser.add_argument("--port",        type=int, default=8888,   help="API port (default: 8888)")

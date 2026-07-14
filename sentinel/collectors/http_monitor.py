@@ -2,6 +2,7 @@ import asyncio
 import logging
 import re
 import time
+from pathlib import Path
 from typing import Optional
 
 from scapy.layers.inet import IP, TCP
@@ -22,6 +23,22 @@ SUSPICIOUS_UA = [
     "nikto", "nmap", "sqlmap", "masscan", "zgrab",
 ]
 
+DEFAULT_WHITELIST: list[str] = [
+    "*.windowsupdate.com",
+    "*.microsoft.com",
+    "*.office.com",
+    "*.office.net",
+]
+
+
+def _match_whitelist(host: str, patterns: list[str]) -> bool:
+    for p in patterns:
+        if p.startswith("*.") and host.endswith(p[1:]):
+            return True
+        if host == p:
+            return True
+    return False
+
 
 class HttpMonitor:
     def __init__(
@@ -29,6 +46,7 @@ class HttpMonitor:
         bus: EventBus,
         iface: Optional[str] = None,
         suspicious_keywords: Optional[list[str]] = None,
+        whitelist_path: Optional[Path] = None,
     ):
         self.bus = bus
         self.iface = iface
@@ -37,10 +55,42 @@ class HttpMonitor:
         self._running = False
         self._loop: Optional[asyncio.AbstractEventLoop] = None
         self._total_requests = 0
+        self._whitelist_path = whitelist_path
+        self._whitelist_mtime: float = 0.0
+        self._whitelist_patterns = self._load_whitelist(whitelist_path)
+
+    def _load_whitelist(self, path: Optional[Path]) -> list[str]:
+        if not path:
+            return list(DEFAULT_WHITELIST)
+        try:
+            mtime = path.stat().st_mtime if path.exists() else 0
+            if mtime == self._whitelist_mtime:
+                return self._whitelist_patterns
+            patterns = list(DEFAULT_WHITELIST)
+            if path.exists():
+                lines = path.read_text(encoding="utf-8").splitlines()
+                for l in lines:
+                    l = l.strip().lower()
+                    if l and not l.startswith("#") and l not in patterns:
+                        patterns.append(l)
+            self._whitelist_mtime = mtime
+            log.info("Whitelist loaded: %d patterns (%d from file %s)", len(patterns), len(patterns) - len(DEFAULT_WHITELIST), path)
+            return patterns
+        except Exception as e:
+            log.warning("Failed to load whitelist %s: %s", path, e)
+            return list(DEFAULT_WHITELIST)
+
+    async def _whitelist_reload_loop(self) -> None:
+        while self._running:
+            await asyncio.sleep(30)
+            if self._whitelist_path:
+                self._whitelist_patterns = self._load_whitelist(self._whitelist_path)
 
     async def start(self) -> None:
         self._loop = asyncio.get_running_loop()
         self._running = True
+        if self._whitelist_path:
+            asyncio.create_task(self._whitelist_reload_loop())
         log.info("HTTP monitor starting")
         self._sniffer = AsyncSniffer(
             iface=self.iface,
@@ -112,9 +162,10 @@ class HttpMonitor:
         flags: list[str] = []
 
         path_lower = path.lower()
-        for kw in self._suspicious_keywords:
-            if kw in path_lower:
-                flags.append(f"keyword:{kw}")
+        if not _match_whitelist(host, self._whitelist_patterns):
+            for kw in self._suspicious_keywords:
+                if kw in path_lower:
+                    flags.append(f"keyword:{kw}")
         if referer and host not in referer and referer != "":
             flags.append("cross_origin_referer")
         if any(bot in ua.lower() for bot in SUSPICIOUS_UA):

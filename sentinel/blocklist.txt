@@ -14,5 +14,3 @@ doubleclick.net
 ads.google.com
 *.ads.google.com
 tracking.example.com
-
-# Add your own below:
